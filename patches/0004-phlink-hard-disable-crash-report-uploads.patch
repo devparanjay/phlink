@@ -1,0 +1,33 @@
+From: phlink <phlink@local>
+Subject: [PATCH 4/5] phlink: hard-disable crash report uploads
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+GetCollectStatsConsent() now returns false at the very top, before any
+BRANDING / ChromeOS / settings lookup. Crashpad still produces local
+minidumps under <profile>/Crashpad/ for self-debugging, only the
+uploader path is dead. Survives any future refactor of the
+GOOGLE_CHROME_BRANDING gate. PRD §3.5, TELM-02.
+---
+ chrome/app/chrome_crash_reporter_client.cc | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/chrome/app/chrome_crash_reporter_client.cc b/chrome/app/chrome_crash_reporter_client.cc
+index f0c0ff0871ee9..50619620c377d 100644
+--- a/chrome/app/chrome_crash_reporter_client.cc
++++ b/chrome/app/chrome_crash_reporter_client.cc
+@@ -169,6 +169,13 @@ bool ChromeCrashReporterClient::IsRunningUnattended() {
+ }
+ 
+ bool ChromeCrashReporterClient::GetCollectStatsConsent() {
++  // phlink: never upload crash reports. Crashpad still produces local
++  // minidumps under <profile>/Crashpad/ which are useful for self-debug,
++  // but the uploader path is hard-disabled here in addition to the
++  // GOOGLE_CHROME_BRANDING check below (PRD §3.5, TELM-02). This survives
++  // any upstream refactor that drops the BRANDING gate.
++  return false;
++
+ #if BUILDFLAG(GOOGLE_CHROME_BRANDING)
+   bool is_official_chrome_build = true;
+ #else

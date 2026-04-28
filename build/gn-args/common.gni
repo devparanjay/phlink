@@ -71,3 +71,17 @@ disable_fieldtrial_testing_config = true
 # Cast *sender* (chrome://cast UI) stays available; we only opt out of
 # being a receiver target.
 cast_allow_developer_certificate = false
+
+# ---------------------------------------------------------------------------
+# Phase 4 — Telemetry-Free Defaults
+#
+# These pin the "no phone-home" posture (PRD §3.5, TELM-01..TELM-04).
+# Source-side patches in patches/0050-* and patches/0060-* layer on top so
+# even pref corruption can't re-enable upload.
+
+# No metrics/crash uploader pipeline. The histogram macros still build
+# (components rely on them) but the uploader path is dead.
+enable_reporting = false
+
+# No bundled "Send feedback" uploader.
+enable_feedback_service = false

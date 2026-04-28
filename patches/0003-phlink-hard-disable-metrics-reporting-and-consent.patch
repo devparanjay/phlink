@@ -1,0 +1,39 @@
+From: phlink <phlink@local>
+Subject: [PATCH 3/5] phlink: hard-disable metrics reporting and consent
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+ChromeEnabledStateProvider::IsConsentGiven and IsReportingEnabled now
+return false unconditionally. Defense-in-depth on top of
+build/gn-args/common.gni's enable_reporting=false: even if the consent
+pref were tampered with at runtime, no UMA upload can leave the process.
+PRD §3.5, TELM-01, TELM-02.
+---
+ .../metrics/chrome_metrics_services_manager_client.cc  | 10 ++++++----
+ 1 file changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/chrome/browser/metrics/chrome_metrics_services_manager_client.cc b/chrome/browser/metrics/chrome_metrics_services_manager_client.cc
+index 2cc23dd5d0b5f..c4e05f6542f47 100644
+--- a/chrome/browser/metrics/chrome_metrics_services_manager_client.cc
++++ b/chrome/browser/metrics/chrome_metrics_services_manager_client.cc
+@@ -171,13 +171,15 @@ class ChromeMetricsServicesManagerClient::ChromeEnabledStateProvider
+   ~ChromeEnabledStateProvider() override = default;
+ 
+   bool IsConsentGiven() const override {
+-    return ChromeMetricsServiceAccessor::IsMetricsAndCrashReportingEnabled(
+-        local_state_);
++    // phlink: telemetry is permanently off; no opt-in path in v1
++    // (PRD §3.5, TELM-01..TELM-02). Defense-in-depth on top of
++    // build/gn-args/common.gni's `enable_reporting=false`.
++    return false;
+   }
+ 
+   bool IsReportingEnabled() const override {
+-    return metrics::EnabledStateProvider::IsReportingEnabled() &&
+-           IsClientInSampleImpl(local_state_);
++    // phlink: see IsConsentGiven() above.
++    return false;
+   }
+ 
+  private:

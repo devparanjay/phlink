@@ -1,5 +1,5 @@
 From: phlink <phlink@local>
-Subject: [PATCH 2/2] phlink: rename IDS_PRODUCT_NAME / IDS_PRODUCT_DESCRIPTION
+Subject: [PATCH 2/5] phlink: rename IDS_PRODUCT_NAME / IDS_PRODUCT_DESCRIPTION
  to phlink
 
 Renames the user-visible product strings in the chromium-lane GRD
