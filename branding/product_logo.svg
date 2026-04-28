@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  phlink product logo (256x256 native).
+  Mark = lowercase 'p' monogram on a rounded teal->blue square. The bowl
+  has a horizontal slot through it, evoking ad/tracker blocking.
+  Shapes use only rect/circle/path with simple winding so any conformant
+  SVG renderer (librsvg, ImageMagick MSVG, Skia) produces identical output.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0EA5A4"/>
+      <stop offset="100%" stop-color="#2563EB"/>
+    </linearGradient>
+    <!-- mask: white where the white 'p' should appear, with a black slot
+         that punches the bar through the bowl (and only the bowl). -->
+    <mask id="pmask" maskUnits="userSpaceOnUse" x="0" y="0" width="256" height="256">
+      <rect width="256" height="256" fill="black"/>
+      <!-- Stem -->
+      <rect x="64" y="56" width="32" height="160" rx="16" ry="16" fill="white"/>
+      <!-- Outer bowl disc -->
+      <circle cx="148" cy="128" r="64" fill="white"/>
+      <!-- Inner bowl hole -->
+      <circle cx="148" cy="128" r="32" fill="black"/>
+      <!-- Block-bar slot through the bowl -->
+      <rect x="76" y="120" width="128" height="16" fill="black"/>
+    </mask>
+  </defs>
+
+  <!-- Rounded square base -->
+  <rect x="8" y="8" width="240" height="240" rx="56" ry="56" fill="url(#bg)"/>
+
+  <!-- White 'p' painted through the mask -->
+  <rect width="256" height="256" fill="white" mask="url(#pmask)"/>
+</svg>

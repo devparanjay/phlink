@@ -35,5 +35,39 @@ google_default_client_secret = ""
 # We're not Google's distribution
 is_chrome_branded = false
 
+# Defensive: never enable the Chrome-for-Testing branding lane either.
+is_chrome_for_testing_branded = false
+
 # External contributors don't have access to Reclient
 use_remoteexec = false
+
+# ---------------------------------------------------------------------------
+# Phase 3 — Identity & services strip
+#
+# These pin the no-Google-services posture from PRD §10.1 even if upstream
+# Chromium changes its defaults. Most are already implied by
+# is_chrome_branded=false but we keep them explicit so a future rebase can't
+# silently re-enable them.
+
+# No Safe Browsing v4 phone-home (PRD §3 hard rule).
+safe_browsing_mode = 0
+
+# No bundled Widevine CDM by default. (Already false when unbranded; pinned.)
+enable_widevine = false
+
+# No Chrome Remote Desktop / remoting host.
+enable_remoting = false
+
+# No Hangouts services extension (legacy GoogleMeet hooks).
+enable_hangout_services_extension = false
+
+# No Family Link / supervised user plumbing.
+enable_supervised_users = false
+
+# No field-trial testing config baked into the binary (would phone home).
+disable_fieldtrial_testing_config = true
+
+# No bundled Cast Receiver (the pre-installed "this device is castable" path).
+# Cast *sender* (chrome://cast UI) stays available; we only opt out of
+# being a receiver target.
+cast_allow_developer_certificate = false

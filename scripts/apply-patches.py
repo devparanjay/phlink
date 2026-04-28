@@ -127,6 +127,27 @@ def main() -> int:
             applied += 1
 
     print(f"==> applied {applied} patch(es) successfully")
+
+    # Branding assets are binary; they live in branding/ as source-of-truth
+    # and are rasterized into the chromium tree as a post-patch step.
+    rasterize = repo_root / "scripts" / "branding" / "rasterize-logos.sh"
+    if rasterize.is_file():
+        print(f"==> running {rasterize.relative_to(repo_root)}")
+        result = subprocess.run(
+            ["bash", str(rasterize), str(checkout)],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            print(result.stdout)
+            print(result.stderr, file=sys.stderr)
+            print("warning: branding rasterize step failed; "
+                  "branding will not be applied.", file=sys.stderr)
+            return 1
+        # Echo a couple of lines so the user knows it ran.
+        for line in result.stdout.strip().splitlines()[-3:]:
+            print(f"    {line}")
+
     return 0
 
 

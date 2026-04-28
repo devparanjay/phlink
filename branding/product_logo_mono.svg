@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  phlink monochrome product logo (22x22 native).
+  Solid white silhouette for tray/indicator surfaces. No block-bar at this
+  size — the slot would render as a single pixel and read as a defect.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 22 22" width="22" height="22">
+  <g fill="#FFFFFF" fill-rule="evenodd">
+    <rect x="4" y="4" width="2.4" height="14" rx="1.2" ry="1.2"/>
+    <path d="M 6.4 6
+             a 5 5 0 1 1 0 8
+             a 5 5 0 1 1 0 -8
+             Z
+             M 6.4 8.6
+             a 2.4 2.4 0 1 0 0 2.8
+             a 2.4 2.4 0 1 0 0 -2.8
+             Z"/>
+  </g>
+</svg>
