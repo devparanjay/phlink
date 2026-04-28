@@ -1,0 +1,670 @@
+From 4dd95c3e2c1a325b5766930911ce21899dd2469b Mon Sep 17 00:00:00 2001
+From: phlink <phlink@local>
+Date: Wed, 29 Apr 2026 04:28:04 +0530
+Subject: [PATCH] =?UTF-8?q?phlink:=20phase=205-03=20=E2=80=94=20wire=20adb?=
+ =?UTF-8?q?lock=20URLLoaderThrottle=20into=20ChromeContentBrowserClient?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Adds a blink::URLLoaderThrottle that consults a process-global
+phlink::adblock::Engine and cancels matching loads with
+ERR_BLOCKED_BY_CLIENT. Inserted at the head of
+ChromeContentBrowserClient::CreateURLLoaderThrottles so blocked
+requests short-circuit before any other throttle does work.
+
+- chrome/browser/phlink/adblock/engine_provider.{h,cc}: process-wide
+  singleton holding the live Engine. Lazy init with empty rules in
+  v1; plan 5-04 will seed the bundled lists. std::mutex (not
+  base::Lock) so the .h has no transitive partition_alloc dep.
+- chrome/browser/phlink/adblock/phlink_adblock_throttle.{h,cc}:
+  WillStartRequest + WillRedirectRequest map RequestDestination to
+  adblock-rust's request-type vocabulary, fail open on malformed
+  URLs and non-HTTP(S) schemes, and honor exception ($@@) hits.
+- chrome/browser/chrome_content_browser_client.cc: prepend the
+  adblock throttle to the result vector.
+- chrome/browser/BUILD.gn: pull in :phlink_adblock from the
+  static_library("browser") deps.
+- chrome/browser/phlink/adblock/BUILD.gn: drop testonly from the
+  ffi + source_set targets so they can ship into chrome.
+- third_party/rust/chromium_crates_io/gnrt_config.toml +
+  regenerated BUILD.gn files: promote adblock, aho-corasick, regex,
+  regex-automata, psl, psl-types out of Group::Test so the engine
+  links into chrome (non-testonly).
+- phlink_adblock_unittest.cc: 2 new EngineProvider tests
+  (singleton stability + SetEngineFromRulesForTesting swap).
+
+Verified:
+- ./out/Default/phlink_adblock_unittests → 6/6 SUCCESS.
+- autoninja chrome → Build Succeeded.
+
+Refs PRD §6 (adblock subsystem) and ADBL-01.
+---
+ chrome/browser/BUILD.gn                       |   4 +
+ .../browser/chrome_content_browser_client.cc  |   8 +
+ chrome/browser/phlink/adblock/BUILD.gn        |  23 ++-
+ .../browser/phlink/adblock/engine_provider.cc |  39 ++++
+ .../browser/phlink/adblock/engine_provider.h  |  59 ++++++
+ .../phlink/adblock/phlink_adblock_throttle.cc | 168 ++++++++++++++++++
+ .../phlink/adblock/phlink_adblock_throttle.h  |  66 +++++++
+ .../phlink/adblock/phlink_adblock_unittest.cc |  21 +++
+ third_party/rust/adblock/v0_12/BUILD.gn       |   2 -
+ third_party/rust/aho_corasick/v1/BUILD.gn     |   2 -
+ .../rust/chromium_crates_io/gnrt_config.toml  |  11 +-
+ .../rust/icu_experimental/v0_5/BUILD.gn       |   2 -
+ third_party/rust/icu_list/v2/BUILD.gn         |   1 -
+ third_party/rust/regex/v1/BUILD.gn            |   1 -
+ third_party/rust/regex_automata/v0_4/BUILD.gn |   1 -
+ 15 files changed, 389 insertions(+), 19 deletions(-)
+ create mode 100644 chrome/browser/phlink/adblock/engine_provider.cc
+ create mode 100644 chrome/browser/phlink/adblock/engine_provider.h
+ create mode 100644 chrome/browser/phlink/adblock/phlink_adblock_throttle.cc
+ create mode 100644 chrome/browser/phlink/adblock/phlink_adblock_throttle.h
+
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index 149c04c7a8750..f49ccf25cdc11 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -697,6 +697,10 @@ static_library("browser") {
+     "//base",
+     "//base:build_time",
+     "//base:i18n",
++
++    # phlink: adblock engine + URLLoaderThrottle (PRD §6, plan 5-03).
++    "//chrome/browser/phlink/adblock:phlink_adblock",
++
+     "//base/allocator:buildflags",
+     "//build:branding_buildflags",
+     "//build:chromeos_buildflags",
+diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
+index cc356bdfd8d5d..9a0d5fc91edc8 100644
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -127,6 +127,7 @@
+ #include "chrome/browser/plugins/plugin_utils.h"
+ #include "chrome/browser/policy/chrome_policy_blocklist_service_factory.h"
+ #include "chrome/browser/policy/policy_util.h"
++#include "chrome/browser/phlink/adblock/phlink_adblock_throttle.h"
+ #include "chrome/browser/policy/profile_policy_connector.h"
+ #include "chrome/browser/predictors/loading_predictor.h"
+ #include "chrome/browser/predictors/loading_predictor_factory.h"
+@@ -5969,6 +5970,13 @@ ChromeContentBrowserClient::CreateURLLoaderThrottles(
+ 
+   std::vector<std::unique_ptr<blink::URLLoaderThrottle>> result;
+ 
++  // phlink: adblock runs first so blocked requests are short-circuited
++  // before any other throttle does work (PRD §6, plan 5-03).
++  if (auto adblock_throttle =
++          phlink::adblock::PhlinkAdblockThrottle::MaybeCreate()) {
++    result.push_back(std::move(adblock_throttle));
++  }
++
+   DCHECK(browser_context);
+   Profile* profile = Profile::FromBrowserContext(browser_context);
+   DCHECK(profile);
+diff --git a/chrome/browser/phlink/adblock/BUILD.gn b/chrome/browser/phlink/adblock/BUILD.gn
+index 5b3cf57b5ff45..f457be93404a8 100644
+--- a/chrome/browser/phlink/adblock/BUILD.gn
++++ b/chrome/browser/phlink/adblock/BUILD.gn
+@@ -5,10 +5,8 @@
+ import("//build/rust/rust_static_library.gni")
+ import("//testing/test.gni")
+ 
+-# Rust↔C++ bridge layer over the vendored adblock-rust crate.
+-# Pattern mirrors //components/qr_code_generator:qr_code_generator_ffi_glue.
++# Rust↔C++ bridge over vendored adblock-rust.
+ rust_static_library("phlink_adblock_ffi") {
+-  testonly = true
+   allow_unsafe = true  # cxx underpinning.
+   crate_root = "phlink_adblock_ffi.rs"
+   sources = [ "phlink_adblock_ffi.rs" ]
+@@ -17,15 +15,26 @@ rust_static_library("phlink_adblock_ffi") {
+   deps = [ "//third_party/rust/adblock/v0_12:lib" ]
+ }
+ 
+-# C++ surface — the only target that should appear as a dep elsewhere in
+-# //chrome (once 5-03 wires the URLLoaderThrottle).
++# C++ surface. Plan 5-03 wires this into //chrome/browser via the
++# `PhlinkAdblockThrottle` URLLoaderThrottle.
+ source_set("phlink_adblock") {
+-  testonly = true
+   sources = [
++    "engine_provider.cc",
++    "engine_provider.h",
+     "phlink_adblock.cc",
+     "phlink_adblock.h",
++    "phlink_adblock_throttle.cc",
++    "phlink_adblock_throttle.h",
+   ]
+   public_deps = [ ":phlink_adblock_ffi" ]
++  deps = [
++    "//base",
++    "//net",
++    "//services/network/public/cpp",
++    "//services/network/public/mojom:mojom_shared",
++    "//third_party/blink/public/common:headers",
++    "//url",
++  ]
+ }
+ 
+ source_set("unit_tests") {
+@@ -37,8 +46,6 @@ source_set("unit_tests") {
+   ]
+ }
+ 
+-# Standalone gtest binary so `autoninja phlink_adblock_unittests` produces
+-# a runnable artifact without needing to link the entire chrome unit_tests.
+ test("phlink_adblock_unittests") {
+   deps = [
+     ":unit_tests",
+diff --git a/chrome/browser/phlink/adblock/engine_provider.cc b/chrome/browser/phlink/adblock/engine_provider.cc
+new file mode 100644
+index 0000000000000..6f8d1e1dfb397
+--- /dev/null
++++ b/chrome/browser/phlink/adblock/engine_provider.cc
+@@ -0,0 +1,39 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/phlink/adblock/engine_provider.h"
++
++#include <memory>
++#include <utility>
++
++#include "base/no_destructor.h"
++#include "chrome/browser/phlink/adblock/phlink_adblock.h"
++
++namespace phlink::adblock {
++
++namespace {}  // namespace
++
++// static
++EngineProvider* EngineProvider::GetInstance() {
++  static base::NoDestructor<EngineProvider> instance;
++  return instance.get();
++}
++
++EngineProvider::EngineProvider() = default;
++
++Engine* EngineProvider::GetEngine() {
++  std::lock_guard<std::mutex> lock(mutex_);
++  if (!engine_) {
++    engine_ = Engine::CreateEmpty();
++  }
++  return engine_.get();
++}
++
++void EngineProvider::SetEngineFromRulesForTesting(std::string_view rules) {
++  std::unique_ptr<Engine> fresh = Engine::CreateFromRules(rules);
++  std::lock_guard<std::mutex> lock(mutex_);
++  engine_ = std::move(fresh);
++}
++
++}  // namespace phlink::adblock
+diff --git a/chrome/browser/phlink/adblock/engine_provider.h b/chrome/browser/phlink/adblock/engine_provider.h
+new file mode 100644
+index 0000000000000..d3e8ee3383260
+--- /dev/null
++++ b/chrome/browser/phlink/adblock/engine_provider.h
+@@ -0,0 +1,59 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_PHLINK_ADBLOCK_ENGINE_PROVIDER_H_
++#define CHROME_BROWSER_PHLINK_ADBLOCK_ENGINE_PROVIDER_H_
++
++#include <memory>
++#include <mutex>
++#include <string_view>
++
++namespace base {
++template <typename T>
++class NoDestructor;
++}  // namespace base
++
++namespace phlink::adblock {
++
++class Engine;
++
++// Process-global owner of the network-side adblock engine.
++//
++// Phase 5-03: a single `Engine` lives for the life of the browser process,
++// initialized lazily on first access with an empty rule set. Plan 5-04
++// will replace the empty-engine seed with the bundled filter lists.
++//
++// Thread-safety: `GetEngine()` is safe to call from any thread. The
++// returned pointer is owned by the provider; the underlying `Engine` is
++// itself internally synchronized (Mutex inside `adblock-rust`), so
++// callers may call `ShouldBlock` concurrently from any sequence.
++//
++// The header intentionally avoids including any `base/` headers so that
++// downstream test targets do not need a transitive partition_alloc dep.
++class EngineProvider {
++ public:
++  static EngineProvider* GetInstance();
++
++  EngineProvider(const EngineProvider&) = delete;
++  EngineProvider& operator=(const EngineProvider&) = delete;
++
++  // Returns the live engine pointer. Never null.
++  Engine* GetEngine();
++
++  // Test seam: replace the live engine with one built from `rules`.
++  void SetEngineFromRulesForTesting(std::string_view rules);
++
++ private:
++  friend class base::NoDestructor<EngineProvider>;
++
++  EngineProvider();
++  ~EngineProvider() = delete;
++
++  mutable std::mutex mutex_;
++  std::unique_ptr<Engine> engine_;
++};
++
++}  // namespace phlink::adblock
++
++#endif  // CHROME_BROWSER_PHLINK_ADBLOCK_ENGINE_PROVIDER_H_
+diff --git a/chrome/browser/phlink/adblock/phlink_adblock_throttle.cc b/chrome/browser/phlink/adblock/phlink_adblock_throttle.cc
+new file mode 100644
+index 0000000000000..cf001934b3fce
+--- /dev/null
++++ b/chrome/browser/phlink/adblock/phlink_adblock_throttle.cc
+@@ -0,0 +1,168 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/phlink/adblock/phlink_adblock_throttle.h"
++
++#include <string_view>
++
++#include "chrome/browser/phlink/adblock/engine_provider.h"
++#include "chrome/browser/phlink/adblock/phlink_adblock.h"
++#include "base/memory/ptr_util.h"
++#include "net/base/net_errors.h"
++#include "net/url_request/redirect_info.h"
++#include "services/network/public/cpp/resource_request.h"
++#include "services/network/public/mojom/fetch_api.mojom-shared.h"
++#include "url/gurl.h"
++
++namespace phlink::adblock {
++
++namespace {
++
++// Maps Fetch's `RequestDestination` enum to the string vocabulary
++// adblock-rust accepts. See //services/network/public/mojom/fetch_api.mojom
++// and adblock-rust's `request::RequestType`.
++std::string_view DestinationToRequestType(
++    network::mojom::RequestDestination destination) {
++  using D = network::mojom::RequestDestination;
++  switch (destination) {
++    case D::kEmpty:
++      // Fetch / XHR / beacon all surface as kEmpty in Chromium. Mapping
++      // to "xmlhttprequest" lines up with how adblock-rust's `$xhr`
++      // option is matched.
++      return "xmlhttprequest";
++    case D::kAudio:
++    case D::kVideo:
++    case D::kTrack:
++      return "media";
++    case D::kDocument:
++      return "document";
++    case D::kEmbed:
++    case D::kIframe:
++    case D::kFrame:
++    case D::kFencedframe:
++    case D::kObject:
++      return "subdocument";
++    case D::kFont:
++      return "font";
++    case D::kImage:
++      return "image";
++    case D::kManifest:
++      return "other";
++    case D::kReport:
++      return "ping";
++    case D::kScript:
++    case D::kAudioWorklet:
++    case D::kPaintWorklet:
++    case D::kServiceWorker:
++    case D::kSharedWorker:
++    case D::kWorker:
++    case D::kSpeculationRules:
++    case D::kJson:
++      return "script";
++    case D::kStyle:
++    case D::kXslt:
++      return "stylesheet";
++    case D::kWebIdentity:
++    case D::kDictionary:
++    case D::kSharedStorageWorklet:
++    case D::kWebBundle:
++    case D::kEmailVerification:
++      return "other";
++  }
++  return "other";
++}
++
++// Best-effort source URL: prefer the request initiator's origin URL.
++GURL DeriveSourceUrl(const network::ResourceRequest& request) {
++  if (request.request_initiator.has_value() &&
++      !request.request_initiator->opaque()) {
++    return request.request_initiator->GetURL();
++  }
++  return request.site_for_cookies.RepresentativeUrl();
++}
++
++}  // namespace
++
++// static
++std::unique_ptr<PhlinkAdblockThrottle> PhlinkAdblockThrottle::MaybeCreate() {
++  Engine* engine = EngineProvider::GetInstance()->GetEngine();
++  if (!engine) {
++    return nullptr;
++  }
++  return base::WrapUnique(new PhlinkAdblockThrottle(engine));
++}
++
++PhlinkAdblockThrottle::PhlinkAdblockThrottle(Engine* engine)
++    : engine_(engine) {}
++
++PhlinkAdblockThrottle::~PhlinkAdblockThrottle() = default;
++
++void PhlinkAdblockThrottle::DetachFromCurrentSequence() {
++  // The engine is internally synchronized; safe to use from any sequence.
++}
++
++const char* PhlinkAdblockThrottle::NameForLoggingWillStartRequest() {
++  return "PhlinkAdblockThrottle";
++}
++
++void PhlinkAdblockThrottle::WillStartRequest(network::ResourceRequest* request,
++                                             bool* defer) {
++  if (!engine_ || !request) {
++    return;
++  }
++  if (ShouldBlock(request->url, DeriveSourceUrl(*request),
++                  request->destination)) {
++    delegate_->CancelWithError(net::ERR_BLOCKED_BY_CLIENT,
++                               "phlink-adblock");
++  }
++}
++
++void PhlinkAdblockThrottle::WillRedirectRequest(
++    net::RedirectInfo* redirect_info,
++    const network::mojom::URLResponseHead& /*response_head*/,
++    bool* /*defer*/,
++    std::vector<std::string>* /*to_be_removed_request_headers*/,
++    net::HttpRequestHeaders* /*modified_request_headers*/,
++    net::HttpRequestHeaders* /*modified_cors_exempt_request_headers*/) {
++  if (!engine_ || !redirect_info) {
++    return;
++  }
++  // We don't have the original ResourceRequest here, but
++  // RedirectInfo carries enough to re-evaluate the destination URL.
++  // Use the redirect's site_for_cookies as the source URL hint.
++  GURL source_url = redirect_info->new_site_for_cookies.RepresentativeUrl();
++  // RedirectInfo doesn't carry the destination type, so re-use the
++  // permissive default. The next WillStartRequest pass on the
++  // internally-restarted load will recheck with the precise type.
++  if (ShouldBlock(redirect_info->new_url, source_url,
++                  network::mojom::RequestDestination::kEmpty)) {
++    delegate_->CancelWithError(net::ERR_BLOCKED_BY_CLIENT,
++                               "phlink-adblock-redirect");
++  }
++}
++
++bool PhlinkAdblockThrottle::ShouldBlock(
++    const GURL& url,
++    const GURL& source_url,
++    network::mojom::RequestDestination destination) const {
++  if (!url.is_valid() || !url.SchemeIsHTTPOrHTTPS()) {
++    return false;
++  }
++  Engine::Decision decision = engine_->ShouldBlock(
++      url.spec(),
++      source_url.is_valid() ? std::string_view(source_url.spec())
++                            : std::string_view(),
++      DestinationToRequestType(destination));
++  if (!decision.matched) {
++    return false;
++  }
++  // adblock-rust returns matched=true even for exception hits; the
++  // exception field is non-empty in that case. Honor it as a pass.
++  if (!decision.exception.empty()) {
++    return false;
++  }
++  return true;
++}
++
++}  // namespace phlink::adblock
+diff --git a/chrome/browser/phlink/adblock/phlink_adblock_throttle.h b/chrome/browser/phlink/adblock/phlink_adblock_throttle.h
+new file mode 100644
+index 0000000000000..352384d126abf
+--- /dev/null
++++ b/chrome/browser/phlink/adblock/phlink_adblock_throttle.h
+@@ -0,0 +1,66 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_PHLINK_ADBLOCK_PHLINK_ADBLOCK_THROTTLE_H_
++#define CHROME_BROWSER_PHLINK_ADBLOCK_PHLINK_ADBLOCK_THROTTLE_H_
++
++#include <memory>
++
++#include "base/memory/raw_ptr.h"
++#include "services/network/public/mojom/fetch_api.mojom-shared.h"
++#include "third_party/blink/public/common/loader/url_loader_throttle.h"
++
++namespace phlink::adblock {
++
++class Engine;
++
++// `URLLoaderThrottle` that consults the process-global `Engine` and
++// cancels the load with `net::ERR_BLOCKED_BY_CLIENT` when the rules
++// match. Exception (`@@`) and `$important` semantics are honored by
++// the underlying engine; this throttle simply translates `matched`
++// into a cancel.
++//
++// Lifetime: created per-request by `ChromeContentBrowserClient::
++// CreateURLLoaderThrottles` and consumed by the `ThrottlingURLLoader`
++// machinery. Holds a non-owning pointer to the singleton `Engine`,
++// which lives for the life of the browser process.
++class PhlinkAdblockThrottle final : public blink::URLLoaderThrottle {
++ public:
++  // Returns `nullptr` when adblock is disabled at compile time. Always
++  // returns a throttle in v1 (kill-switch ships in plan 5-06).
++  static std::unique_ptr<PhlinkAdblockThrottle> MaybeCreate();
++
++  PhlinkAdblockThrottle(const PhlinkAdblockThrottle&) = delete;
++  PhlinkAdblockThrottle& operator=(const PhlinkAdblockThrottle&) = delete;
++  ~PhlinkAdblockThrottle() override;
++
++  // blink::URLLoaderThrottle:
++  void DetachFromCurrentSequence() override;
++  void WillStartRequest(network::ResourceRequest* request,
++                        bool* defer) override;
++  void WillRedirectRequest(
++      net::RedirectInfo* redirect_info,
++      const network::mojom::URLResponseHead& response_head,
++      bool* defer,
++      std::vector<std::string>* to_be_removed_request_headers,
++      net::HttpRequestHeaders* modified_request_headers,
++      net::HttpRequestHeaders* modified_cors_exempt_request_headers) override;
++  const char* NameForLoggingWillStartRequest() override;
++
++ private:
++  explicit PhlinkAdblockThrottle(Engine* engine);
++
++  // Common matcher used by start + redirect.
++  bool ShouldBlock(const GURL& url,
++                   const GURL& source_url,
++                   network::mojom::RequestDestination destination) const;
++
++  // Non-owning. The engine is owned by the singleton EngineProvider and
++  // outlives every throttle.
++  raw_ptr<Engine> engine_;
++};
++
++}  // namespace phlink::adblock
++
++#endif  // CHROME_BROWSER_PHLINK_ADBLOCK_PHLINK_ADBLOCK_THROTTLE_H_
+diff --git a/chrome/browser/phlink/adblock/phlink_adblock_unittest.cc b/chrome/browser/phlink/adblock/phlink_adblock_unittest.cc
+index 93eba10004b82..1439d0649b259 100644
+--- a/chrome/browser/phlink/adblock/phlink_adblock_unittest.cc
++++ b/chrome/browser/phlink/adblock/phlink_adblock_unittest.cc
+@@ -6,6 +6,7 @@
+ 
+ #include <memory>
+ 
++#include "chrome/browser/phlink/adblock/engine_provider.h"
+ #include "testing/gtest/include/gtest/gtest.h"
+ 
+ namespace phlink::adblock {
+@@ -63,5 +64,25 @@ TEST(PhlinkAdblockEngineTest, ExceptionRuleAllowsRequest) {
+   EXPECT_FALSE(allowed.exception.empty());
+ }
+ 
++TEST(PhlinkAdblockEngineProviderTest, SingletonAlwaysReturnsEngine) {
++  Engine* e = EngineProvider::GetInstance()->GetEngine();
++  ASSERT_TRUE(e);
++  // Same singleton on a second call.
++  EXPECT_EQ(e, EngineProvider::GetInstance()->GetEngine());
++}
++
++TEST(PhlinkAdblockEngineProviderTest, SetEngineFromRulesForTestingSwaps) {
++  EngineProvider::GetInstance()->SetEngineFromRulesForTesting(
++      "||ad.provider.invalid^");
++  Engine* e = EngineProvider::GetInstance()->GetEngine();
++  ASSERT_TRUE(e);
++  auto d = e->ShouldBlock("https://ad.provider.invalid/x.js",
++                          "https://news.example.test/", "script");
++  EXPECT_TRUE(d.matched);
++
++  // Reset to empty so we don't pollute the global for other tests.
++  EngineProvider::GetInstance()->SetEngineFromRulesForTesting("");
++}
++
+ }  // namespace
+ }  // namespace phlink::adblock
+diff --git a/third_party/rust/adblock/v0_12/BUILD.gn b/third_party/rust/adblock/v0_12/BUILD.gn
+index 2339c82a68dba..c443bb0eef61f 100644
+--- a/third_party/rust/adblock/v0_12/BUILD.gn
++++ b/third_party/rust/adblock/v0_12/BUILD.gn
+@@ -95,8 +95,6 @@ cargo_crate("lib") {
+     "full-regex-handling",
+   ]
+ 
+-  testonly = true
+-
+   #####################################################################
+   # Tweaking which GN `config`s apply to this target.
+ 
+diff --git a/third_party/rust/aho_corasick/v1/BUILD.gn b/third_party/rust/aho_corasick/v1/BUILD.gn
+index 7fbd6b05b7096..5b13985522eb4 100644
+--- a/third_party/rust/aho_corasick/v1/BUILD.gn
++++ b/third_party/rust/aho_corasick/v1/BUILD.gn
+@@ -67,8 +67,6 @@ cargo_crate("lib") {
+     "std",
+   ]
+ 
+-  testonly = true
+-
+   #####################################################################
+   # Tweaking which GN `config`s apply to this target.
+ 
+diff --git a/third_party/rust/chromium_crates_io/gnrt_config.toml b/third_party/rust/chromium_crates_io/gnrt_config.toml
+index e8143c03f7745..730952885cce2 100644
+--- a/third_party/rust/chromium_crates_io/gnrt_config.toml
++++ b/third_party/rust/chromium_crates_io/gnrt_config.toml
+@@ -115,6 +115,9 @@ remove_crates = []
+ root = "chromium"
+ 
+ [crate.adblock]
++# Used by phlink (browser process) for network and cosmetic adblock.
++# Brave's adblock-rust; pure parser/matcher, no I/O, no FFI.
++group = 'safe'
+ extra_kv = { allow_unsafe = true }
+ 
+ [crate.addr]
+@@ -133,8 +136,9 @@ allow_first_party_usage = false
+ extra_kv = { allow_unsafe = true }
+ 
+ [crate.aho-corasick]
+-group = 'test'
+-allow_first_party_usage = false
++# Promoted from 'test' for phlink: required by adblock-rust (core product, PRD §6.1).
++# Widely-used, well-audited Rust regex engine dependency.
++group = 'safe'
+ extra_kv = { allow_unsafe = true }
+ 
+ [crate.android_system_properties]
+@@ -689,9 +693,12 @@ extra_kv = { allow_unsafe = false }
+ group = 'test'
+ 
+ [crate.psl]
++# PSL lookup over compiled-in data; no I/O, no unsafe in surface used by adblock.
++group = 'safe'
+ extra_kv = { allow_unsafe = false }
+ 
+ [crate.psl-types]
++group = 'safe'
+ extra_kv = { allow_unsafe = false }
+ 
+ [crate.pxfm]
+diff --git a/third_party/rust/icu_experimental/v0_5/BUILD.gn b/third_party/rust/icu_experimental/v0_5/BUILD.gn
+index b3facad4ba82f..911e0e31b7197 100644
+--- a/third_party/rust/icu_experimental/v0_5/BUILD.gn
++++ b/third_party/rust/icu_experimental/v0_5/BUILD.gn
+@@ -158,8 +158,6 @@ cargo_crate("lib") {
+   ]
+   features = [ "compiled_data" ]
+ 
+-  testonly = true
+-
+   #####################################################################
+   # Tweaking which GN `config`s apply to this target.
+ 
+diff --git a/third_party/rust/icu_list/v2/BUILD.gn b/third_party/rust/icu_list/v2/BUILD.gn
+index c291e049ef23f..824253cba5ca8 100644
+--- a/third_party/rust/icu_list/v2/BUILD.gn
++++ b/third_party/rust/icu_list/v2/BUILD.gn
+@@ -49,7 +49,6 @@ cargo_crate("lib") {
+   # //third_party/rust/chromium_crates_io/Cargo.toml to use
+   # it from first-party code.
+   visibility = [ "//third_party/rust/*" ]
+-  testonly = true
+ 
+   #####################################################################
+   # Tweaking which GN `config`s apply to this target.
+diff --git a/third_party/rust/regex/v1/BUILD.gn b/third_party/rust/regex/v1/BUILD.gn
+index 0a3e2360ffaf7..34893211bc71a 100644
+--- a/third_party/rust/regex/v1/BUILD.gn
++++ b/third_party/rust/regex/v1/BUILD.gn
+@@ -71,7 +71,6 @@ cargo_crate("lib") {
+   # //third_party/rust/chromium_crates_io/Cargo.toml to use
+   # it from first-party code.
+   visibility = [ "//third_party/rust/*" ]
+-  testonly = true
+ 
+   #####################################################################
+   # Tweaking which GN `config`s apply to this target.
+diff --git a/third_party/rust/regex_automata/v0_4/BUILD.gn b/third_party/rust/regex_automata/v0_4/BUILD.gn
+index afa6c5172c0b2..c6462c916ef0c 100644
+--- a/third_party/rust/regex_automata/v0_4/BUILD.gn
++++ b/third_party/rust/regex_automata/v0_4/BUILD.gn
+@@ -134,7 +134,6 @@ cargo_crate("lib") {
+   # //third_party/rust/chromium_crates_io/Cargo.toml to use
+   # it from first-party code.
+   visibility = [ "//third_party/rust/*" ]
+-  testonly = true
+ 
+   #####################################################################
+   # Tweaking which GN `config`s apply to this target.
+-- 
+2.50.1 (Apple Git-155)
+
