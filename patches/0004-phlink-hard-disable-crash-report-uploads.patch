@@ -1,5 +1,5 @@
 From: phlink <phlink@local>
-Subject: [PATCH 4/5] phlink: hard-disable crash report uploads
+Subject: [PATCH 4/6] phlink: hard-disable crash report uploads
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit

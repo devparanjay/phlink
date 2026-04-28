@@ -1,5 +1,5 @@
 From: phlink <phlink@local>
-Subject: [PATCH 3/5] phlink: hard-disable metrics reporting and consent
+Subject: [PATCH 3/6] phlink: hard-disable metrics reporting and consent
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit

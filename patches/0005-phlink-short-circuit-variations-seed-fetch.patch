@@ -1,5 +1,5 @@
 From: phlink <phlink@local>
-Subject: [PATCH 5/5] phlink: short-circuit variations seed fetch
+Subject: [PATCH 5/6] phlink: short-circuit variations seed fetch
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit

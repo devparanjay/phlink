@@ -1,0 +1,45 @@
+From: phlink <phlink@local>
+Subject: [PATCH 6/6] phlink: default DoH to Secure mode with Cloudflare
+ 1.1.1.1
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Flip the kDnsOverHttpsMode default from kAutomatic to kSecure and seed
+kDnsOverHttpsTemplates with Cloudflare's no-log DoH endpoint
+(https://cloudflare-dns.com/dns-query). Quad9 and NextDNS are already
+shipped in net/dns/public/doh_provider_entry.cc and remain selectable
+from chrome://settings.
+
+Combined with Phase 4 Wave 1 telemetry kill, this means a fresh phlink
+profile makes zero plain-DNS lookups against the OS resolver for any
+site in the Cloudflare DoH list, even before the user opens settings.
+
+PRD §3.5, PRIV-DNS-01.
+---
+ .../net/default_dns_over_https_config_source.cc        | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/chrome/browser/net/default_dns_over_https_config_source.cc b/chrome/browser/net/default_dns_over_https_config_source.cc
+index e5a2aadcc85f6..1b4d795482728 100644
+--- a/chrome/browser/net/default_dns_over_https_config_source.cc
++++ b/chrome/browser/net/default_dns_over_https_config_source.cc
+@@ -27,9 +27,17 @@ DefaultDnsOverHttpsConfigSource::DefaultDnsOverHttpsConfigSource(
+   // result in reentrancy and mess up registration between this code and
+   // NetworkService creation.
+   if (set_up_pref_defaults) {
++    // phlink: default to "secure" mode with Cloudflare 1.1.1.1 (no-log) so
++    // every fresh profile resolves DNS over HTTPS out of the box (PRD §3.5,
++    // PRIV-DNS-01). Users can switch to Quad9 or NextDNS in chrome://settings;
++    // both ship in the upstream provider list (net/dns/public/
++    // doh_provider_entry.cc).
+     local_state->SetDefaultPrefValue(prefs::kDnsOverHttpsMode,
+                                      base::Value(SecureDnsConfig::ModeToString(
+-                                         net::SecureDnsMode::kAutomatic)));
++                                         net::SecureDnsMode::kSecure)));
++    local_state->SetDefaultPrefValue(
++        prefs::kDnsOverHttpsTemplates,
++        base::Value("https://cloudflare-dns.com/dns-query"));
+   }
+ }
+ 

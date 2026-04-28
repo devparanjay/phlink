@@ -1,5 +1,5 @@
 From: phlink <phlink@local>
-Subject: [PATCH 1/5] phlink: rebrand BRANDING file (Chromium -> phlink)
+Subject: [PATCH 1/6] phlink: rebrand BRANDING file (Chromium -> phlink)
 
 Drives most product-string substitutions at build time (mac bundle name,
 installer titles, copyright, etc.). Patch slot 0001/0030 of Phase 3.
