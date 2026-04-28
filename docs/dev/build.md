@@ -129,6 +129,8 @@ pwsh scripts/build.ps1
 
 This runs `autoninja -C out/Default chrome` inside the Chromium checkout. The first build takes hours; incremental builds are much faster.
 
+> **Memory:** `autoninja` defaults to one job per core. On a 16–18 GB RAM machine this will OOM during V8 / Blink compile (each clang TU can hit 2–3 GB resident). Cap the job count: `autoninja -j 8 -C out/Default chrome` (or lower for 16 GB). Full-link memory peak is separate; see `is_component_build` below.
+
 The output binary is currently named `chrome` (or `Chromium.app` on macOS). The phlink rename happens in **Phase 3 — Identity & Branding Strip**.
 
 ### Running unit tests
