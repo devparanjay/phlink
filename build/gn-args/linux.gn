@@ -1,0 +1,14 @@
+# build/gn-args/linux.gn
+#
+# Linux build args. The scripts/gn-gen.{sh,ps1} wrapper concatenates this
+# file with build/gn-args/common.gni and passes the result as --args to `gn gen`.
+
+target_os = "linux"
+target_cpu = "x64"
+
+# Use system libraries where possible to keep binaries small.
+use_sysroot = true
+
+# Don't bundle ffmpeg branding for proprietary codecs by default.
+proprietary_codecs = false
+ffmpeg_branding = "Chromium"

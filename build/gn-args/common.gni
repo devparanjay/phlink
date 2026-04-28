@@ -1,0 +1,39 @@
+# build/gn-args/common.gni
+#
+# Shared GN argument baseline for phlink builds across all platforms.
+#
+# Per-platform files (linux.gn, mac.gn, win.gn) source these defaults and add
+# platform-specific tweaks. Lines beginning with '#' are stripped by the
+# scripts/gn-gen.{sh,ps1} wrappers before being passed to `gn gen`.
+#
+# Phase 1 keeps this minimal — telemetry/branding/privacy flags layer in
+# Phases 3, 4, 6.
+
+# Build mode
+is_debug = false
+is_component_build = false
+symbol_level = 1
+blink_symbol_level = 0
+
+# Disable Native Client (deprecated, not needed)
+enable_nacl = false
+
+# Don't fail builds on warnings (we may add new ones during phlink work)
+treat_warnings_as_errors = false
+
+# Skip Profile-Guided Optimization for fast iteration; production builds
+# will turn this on in a later phase.
+chrome_pgo_phase = 0
+
+# We don't ship Google API keys. Phase 3 will also strip Google services
+# wholesale; this just makes sure no upstream defaults leak in.
+use_official_google_api_keys = false
+google_api_key = ""
+google_default_client_id = ""
+google_default_client_secret = ""
+
+# We're not Google's distribution
+is_chrome_branded = false
+
+# External contributors don't have access to Reclient
+use_remoteexec = false

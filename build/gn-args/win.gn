@@ -1,0 +1,12 @@
+# build/gn-args/win.gn
+#
+# Windows build args. Imports the common baseline.
+
+target_os = "win"
+target_cpu = "x64"
+
+# Don't bundle proprietary codecs by default.
+proprietary_codecs = false
+ffmpeg_branding = "Chromium"
+
+# Don't sign by default (signing happens in Phase 10).

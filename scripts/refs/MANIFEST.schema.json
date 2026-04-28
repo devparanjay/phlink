@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://phlink.dev/schemas/refs-manifest.schema.json",
+  "title": "phlink .refs/ MANIFEST",
+  "description": "Schema for MANIFEST.json files inside .refs/<ecosystem>/<name>@<version>/. Tracks an upstream documentation snapshot used for offline reference and AI-assisted development.",
+  "type": "object",
+  "required": ["name", "version", "ecosystem", "source_url", "fetch_date", "license"],
+  "additionalProperties": false,
+  "properties": {
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Project name (e.g. 'chromium', 'adblock-rust', 'jsonschema')."
+    },
+    "version": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Version or git ref of the upstream snapshot (e.g. '128.0.6613.84', 'main', '0.8.0')."
+    },
+    "ecosystem": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Top-level ecosystem bucket (e.g. 'chromium', 'rust', 'python', 'js', 'docs')."
+    },
+    "source_url": {
+      "type": "string",
+      "format": "uri",
+      "description": "Canonical URL the docs were fetched from."
+    },
+    "fetch_date": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 UTC timestamp of when the snapshot was fetched."
+    },
+    "license": {
+      "type": "string",
+      "minLength": 1,
+      "description": "SPDX license identifier (preferred) or short license string."
+    },
+    "sha256_of_archive": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "SHA-256 of the source archive, hex-encoded."
+    },
+    "notes": {
+      "type": "string",
+      "description": "Free-form notes about the snapshot."
+    },
+    "files": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of files in the snapshot (informational)."
+    },
+    "size_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Total size of the snapshot in bytes (informational)."
+    }
+  }
+}

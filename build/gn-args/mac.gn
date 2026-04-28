@@ -1,0 +1,14 @@
+# build/gn-args/mac.gn
+#
+# macOS build args. Imports the common baseline.
+
+target_os = "mac"
+# Use the host's default arch; users on Apple Silicon should set target_cpu = "arm64"
+# explicitly. We don't lock it here.
+
+# Don't bundle proprietary codecs by default.
+proprietary_codecs = false
+ffmpeg_branding = "Chromium"
+
+# Don't sign by default (signing happens in Phase 10).
+mac_deployment_target = "11.0"
