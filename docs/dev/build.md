@@ -217,3 +217,19 @@ today, and a dedicated phase will revisit each:
 When picking up the SB strip, the entrypoint is
 `//chrome/test/BUILD.gn:59` and the dep graph it pulls in.
 
+
+## Branding regression gate
+
+After every build, run:
+
+```bash
+bash tests/branding-audit/audit.sh
+```
+
+This scans the built bundle for residual "Chromium" / "Google Chrome"
+strings and fails on anything not on `tests/branding-audit/allowlist.txt`.
+The allowlist enumerates every legitimate category (third-party debug
+paths, devtools URLs, GRD translation hints, GL_RENDERER, etc.) so
+genuine regressions surface immediately. Manual smoke checklist for
+GUI surfaces lives at `tests/branding-audit/SMOKE.md`. See Phase 4.7
+plan for context.

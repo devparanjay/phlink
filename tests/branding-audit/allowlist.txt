@@ -1,0 +1,156 @@
+# tests/branding-audit/allowlist.txt
+#
+# Phase 4.7 (BRND-01) — Acceptable "Chromium" / "Google Chrome" string
+# matches in the built phlink bundle. Any string in the binary that
+# matches /\bchromium\b|google chrome/i must be covered by an entry
+# in this file (substring match). The categories below are the only
+# justifications that should ever be added.
+#
+# Format: one fixed substring per line. Lines starting with `#` or
+# blank lines are ignored. The match is case-insensitive substring
+# (audit.sh normalizes both sides).
+#
+# Categories:
+#   third-party-debug-path  — file paths embedded in __FILE__ / __builtin_FILE
+#                             from third_party/ subtrees that vendor
+#                             chromium-flavored sources. Not user-visible.
+#   devtools-url            — bug-tracker / docs URLs printed in DevTools
+#                             console errors and dev-only diagnostics.
+#                             Power-user surface; acceptable.
+#   grd-translation-ex      — <ex>Chromium</ex> translation-hint text
+#                             baked into untranslated string blob. The
+#                             runtime string substitutes IDS_PRODUCT_NAME
+#                             ("phlink"); the <ex> is example-only.
+#   gl-renderer             — OpenGL ES *Chromium* GL_RENDERER strings.
+#                             Fingerprintable — tracked separately under
+#                             a future fingerprint-hardening phase.
+#   brand-check-guard       — guards on `is_chrome_branded` that print
+#                             "...not allowed in Google Chrome..." but
+#                             are inert in phlink (we are not chrome-branded).
+#   native-messaging-path   — `/Library/Application Support/Chromium/...`
+#                             native-messaging host lookup paths. phlink
+#                             does not ship native-messaging hosts; these
+#                             paths exist for compat with Chromium-installed
+#                             hosts only.
+#   internal-symbol         — internal C++ symbol names / proto track-event
+#                             namespaces that surface only in `strings`.
+
+# ── third-party-debug-path ───────────────────────────────────────────
+../../third_party/federated_compute/chromium/
+../../third_party/inspector_protocol/crdtp/chromium/
+../../third_party/libaddressinput/chromium/
+../../third_party/pthreadpool/chromium/
+protos/third_party/chromium/
+
+# ── devtools-url ─────────────────────────────────────────────────────
+blog.chromium.org
+issues.chromium.org
+bugs.chromium.org
+chromium.googlesource.com
+www.chromium.org
+dev.chromium.org
+github.com/gpuweb
+@chromium.org
+
+# ── grd-translation-ex / runtime-substituted strings ─────────────────
+# These appear in the raw string blob with "Chromium" placeholder; at
+# runtime they're concatenated with IDS_PRODUCT_NAME ("phlink"). The
+# `<ex>` literal is what the audit sees in `strings` output.
+Chromium PDF Viewer
+Chromium NetLog
+Chromium Apps.localized
+Chromium Initial Preferences
+Chromium Master Preferences
+Chromium unexportable key
+
+# ── gl-renderer ──────────────────────────────────────────────────────
+OpenGL ES 2.0 Chromium
+OpenGL ES 3.0 Chromium
+OpenGL ES GLSL ES 1.0 Chromium
+OpenGL ES GLSL ES 3.0 Chromium
+
+# ── brand-check-guard (inert on phlink) ──────────────────────────────
+not allowed in Google Chrome
+configured, but the account consistency mode does not support signing in to Chromium
+configure the OAuth client ID and client secret in order to sign in to Chromium
+this Chromium build
+Chromium does not support sentencepiece
+Model not available in Chromium
+On-device model is not available in Chromium
+Cloud management controller initialization aborted as CBCM is not enabled
+official Google Chrome build
+
+# ── native-messaging-path ────────────────────────────────────────────
+/Library/Application Support/Chromium/NativeMessagingHosts
+/Library/Google/Google Chrome Brand.plist
+
+# ── internal-symbol / diagnostic ─────────────────────────────────────
+.org.chromium.Chromium.unexportable-keys
+Chromium.kSelectionDirection
+Chromium.kViewDidBecomeFirstResponder
+A prohibited accessible name was used in chromium web UI
+app=chromium
+application/x-chromium-surface-embed
+chrome_track_event
+chrome_enums
+C=US, O=Chromium, OU=Authenticator Attestation
+CHROMIUM
+Chromium
+
+# ── log/diagnostic prose mentioning chromium ─────────────────────────
+Capture appears to have stalled
+Disallow usage of SPIR-V
+Beware! featureLevel was set to "compatibility"
+If you see this error we have a bug. Please report this bug to chromium
+Ignoring EnableBitstreamConverter
+Mixed Content
+Public-key credentials are only available to HTTPS origins
+Request throttled
+The Notification API may no longer be used from insecure origins
+You are attempting to access a privileged scope
+`getCurrentPosition()` and `watchPosition()`
+`getUserMedia()`
+This request was automatically upgraded to HTTPS
+We're always improving our models
+If you are a site owner, and you think this trial is causing
+processor; not a Google Chrome build
+
+# ── Google Chrome literal (used inside brand-check guards / messages) ─
+Google Chrome
+
+# ── internal org.chromium.* UTIs / dispatch queues / pasteboard types ─
+org.chromium
+com.chromium.
+
+# ── chromium/x-* pasteboard / drag-drop UTIs ─────────────────────────
+chromium/x-
+
+# ── chromium-* WebGPU extension names + WGSL diagnostics ─────────────
+chromium-experimental-
+chromium-pdf
+chromium.unreachable_code
+
+# ── source code search URLs ──────────────────────────────────────────
+cs.chromium.org
+source.chromium.org
+codereview.chromium.org
+build.chromium.org
+crbug.com/chromium/
+
+# ── i18n / address validation endpoint ───────────────────────────────
+chromium-i18n.appspot.com
+
+# ── third-party-debug-path (additional) ──────────────────────────────
+third_party/chromium/client-variations
+
+# ── NextDNS DoH endpoint (NextDNS-hosted, not phlink-controlled) ─────
+chromium.dns.nextdns.io
+
+# ── media route / cast URN scheme ────────────────────────────────────
+urn:x-org.chromium
+
+# ── short bare matches ───────────────────────────────────────────────
+chromium.
+chromium.org
+chromium-
+
