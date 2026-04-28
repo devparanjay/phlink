@@ -1,0 +1,21 @@
+# Network-capture: empty allow-list of outbound hostnames.
+#
+# Phase 4 Wave 3 sets the bar deliberately high: a freshly built phlink,
+# launched with a fresh profile and left idle on about:blank for the
+# probe window, must contact ZERO hosts. Every entry below has to be
+# justified in a code comment when added, and ideally backed by a
+# follow-up patch that suppresses the request entirely.
+#
+# Format: one bare hostname per line, '#' for comments, blank lines OK.
+# Wildcards are not supported on purpose — each subdomain must be
+# explicitly accepted so a future leak from a sibling host fails the
+# test.
+#
+# When extending this list:
+#   1. Open a PR with the new entry AND a justification block in this
+#      file.
+#   2. File a follow-up issue tagged "phlink-leak" for the host so it
+#      can be eliminated.
+#   3. Never add wildcards.
+#
+# Currently-allowed hosts: (none)

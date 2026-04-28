@@ -1,0 +1,60 @@
+name: network-capture
+
+# Phase 4 Wave 3 — network-leak regression test.
+# Until the first phlink binary lands (Phase 6+), this workflow only
+# proves the harness imports and starts mitmproxy cleanly. Once a
+# binary artifact is published, set PHLINK_BINARY in the matrix below
+# to an actual path and the leak assertion will run for real.
+
+on:
+  pull_request:
+    paths:
+      - "tests/network-capture/**"
+      - ".github/workflows/network-capture.yml"
+      - "patches/**"
+      - "build/gn-args/**"
+  push:
+    branches: [main, "dev-*"]
+    paths:
+      - "tests/network-capture/**"
+      - ".github/workflows/network-capture.yml"
+      - "patches/**"
+      - "build/gn-args/**"
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    name: harness smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: tests/network-capture/requirements.txt
+
+      - name: Install dependencies
+        working-directory: tests/network-capture
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install cryptography
+
+      - name: Smoke-test the fixture (no PHLINK_BINARY → tests skip)
+        working-directory: tests/network-capture
+        run: |
+          # The browser-launch test should report SKIPPED here, not
+          # ERROR or FAIL. That confirms conftest.py imports clean,
+          # mitmproxy boots, and the SPKI helper compiles.
+          pytest -v --tb=short
+
+      - name: Upload mitm logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mitm-confdir
+          path: /tmp/phlink-mitm-*
+          if-no-files-found: ignore

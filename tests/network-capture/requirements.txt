@@ -1,0 +1,10 @@
+# Network-capture test fixture — Phase 4 Wave 3.
+# Verifies that a freshly launched phlink browser, given 60 seconds of
+# steady-state idle on about:blank, contacts no host outside an explicit
+# allow-list. This is the third layer of defense against telemetry leaks,
+# beneath GN args (build/gn-args/common.gni) and source patches
+# (patches/0003..0006).
+mitmproxy==11.0.2
+playwright==1.49.1
+pytest==8.3.4
+pytest-asyncio==0.25.0
