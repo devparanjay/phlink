@@ -171,6 +171,12 @@ gn gen ../chromium-src/src/out/Default
 
 **"too many open files" (macOS)** — bump the limit: `ulimit -n 8192`.
 
+**"build hangs forever, hundreds of `ninja`/`pyenv-which` processes spawn"** — depot_tools' `ninja.py` resolves the system `ninja` via `$PATH` (skipping its own dir to avoid recursion). If `~/.pyenv/shims` appears in `$PATH` ahead of a real `ninja`, the shim re-invokes `pyenv exec ninja` which loops back to depot_tools' wrapper and forks indefinitely. Install a real `ninja` (`brew install ninja`) and prepend its dir ahead of pyenv shims in your build session:
+
+```bash
+export PATH="$HOME/depot_tools:/opt/homebrew/bin:$PATH"
+```
+
 **"build hangs at link step"** — link is RAM-heavy. Set `is_component_build = true` in `args.gn` for development; component builds link faster but produce many `.dylib`/`.so`/`.dll` shards.
 
 **"`gclient sync` fails on Windows"** — make sure you have long-paths support enabled (`git config --system core.longpaths true`) and antivirus exclusions for both `chromium-src\` and your depot_tools dir.
