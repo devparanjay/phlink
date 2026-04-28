@@ -1,0 +1,521 @@
+From ff2a1359078d53f017f91c054983aff246ab0d44 Mon Sep 17 00:00:00 2001
+From: phlink <phlink@local>
+Date: Wed, 29 Apr 2026 04:01:13 +0530
+Subject: [PATCH] =?UTF-8?q?phlink:=20phase=205-02=20=E2=80=94=20real=20adb?=
+ =?UTF-8?q?lock=20C++=20wrapper=20via=20cxx::bridge?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Replaces the 5-02a smoke consumer with a proper Rust↔C++ bridge layer
+over the vendored adblock-rust crate (Brave, MPL-2.0).
+
+Layout (mirrors //components/qr_code_generator):
+
+* chrome/browser/phlink/adblock/phlink_adblock_ffi.rs
+  - cxx::bridge exposing engine_new_empty / engine_new_from_rules /
+    engine_should_block. Returns a plain BlockDecision struct so 5-03
+    won't need another FFI roundtrip when it starts honoring
+    `important` and `redirect`. Malformed URLs fail open
+    (matched=false) per PRD §6.
+
+* chrome/browser/phlink/adblock/phlink_adblock.{h,cc}
+  - Thin C++ owner class `phlink::adblock::Engine` with
+    CreateEmpty / CreateFromRules / ShouldBlock. Holds a
+    rust::Box<EngineHandle>; concrete engine state is opaque to C++.
+
+* chrome/browser/phlink/adblock/phlink_adblock_unittest.cc + test()
+  target `phlink_adblock_unittests` — 4 gtest cases (empty engine,
+  malformed URL fails open, host block, exception rule).
+
+Also: drop default-features for adblock so the engine is built without
+the `single-thread` feature. The Mutex-protected build is Send+Sync,
+which simplifies the per-thread plumbing in 5-03 vs. the original D-06
+atomic-swap design. Verified during research: URLLoaderRequestInterceptor
+is documented as navigation-only, so 5-03 will use
+ContentBrowserClient::CreateURLLoaderThrottles instead.
+
+Validation:
+  autoninja -C out/Default phlink_adblock_unittests
+  ./out/Default/phlink_adblock_unittests
+  → SUCCESS: all tests passed (4/4).
+
+Refs PRD §5 (perf, ad blocking), ADBL-01.
+---
+ BUILD.gn                                      |   2 +-
+ chrome/browser/phlink/adblock/BUILD.gn        |  47 +++++--
+ .../browser/phlink/adblock/phlink_adblock.cc  |  55 ++++++++
+ .../browser/phlink/adblock/phlink_adblock.h   |  71 +++++++++++
+ .../phlink/adblock/phlink_adblock_check.rs    |  17 ---
+ .../phlink/adblock/phlink_adblock_ffi.rs      | 118 ++++++++++++++++++
+ .../phlink/adblock/phlink_adblock_unittest.cc |  67 ++++++++++
+ third_party/rust/adblock/v0_12/BUILD.gn       |   2 -
+ .../rust/chromium_crates_io/Cargo.toml        |   2 +-
+ 9 files changed, 352 insertions(+), 29 deletions(-)
+ create mode 100644 chrome/browser/phlink/adblock/phlink_adblock.cc
+ create mode 100644 chrome/browser/phlink/adblock/phlink_adblock.h
+ delete mode 100644 chrome/browser/phlink/adblock/phlink_adblock_check.rs
+ create mode 100644 chrome/browser/phlink/adblock/phlink_adblock_ffi.rs
+ create mode 100644 chrome/browser/phlink/adblock/phlink_adblock_unittest.cc
+
+diff --git a/BUILD.gn b/BUILD.gn
+index 2460a044c278f..368b2b9a0d960 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -855,7 +855,7 @@ group("rust_build_tests") {
+   testonly = true
+   deps = [
+     "//build/rust/tests",
+-    "//chrome/browser/phlink/adblock:phlink_adblock_check",
++    "//chrome/browser/phlink/adblock:phlink_adblock_unittests",
+   ]
+ }
+ 
+diff --git a/chrome/browser/phlink/adblock/BUILD.gn b/chrome/browser/phlink/adblock/BUILD.gn
+index 03f9434b0284d..5b3cf57b5ff45 100644
+--- a/chrome/browser/phlink/adblock/BUILD.gn
++++ b/chrome/browser/phlink/adblock/BUILD.gn
+@@ -2,15 +2,46 @@
+ # Use of this source code is governed by a BSD-style license that can be
+ # found in the LICENSE file.
+ 
+-import("//build/rust/rust_executable.gni")
++import("//build/rust/rust_static_library.gni")
++import("//testing/test.gni")
+ 
+-# Build-time smoke test: forces compilation of the vendored adblock-rust
+-# rlib + transitive deps. This target exists so the GN graph has at least
+-# one consumer of //third_party/rust/adblock/v0_12:lib until plan 5-02
+-# lands the real C++ wrapper. It is NOT linked into //chrome.
+-rust_executable("phlink_adblock_check") {
++# Rust↔C++ bridge layer over the vendored adblock-rust crate.
++# Pattern mirrors //components/qr_code_generator:qr_code_generator_ffi_glue.
++rust_static_library("phlink_adblock_ffi") {
+   testonly = true
+-  crate_root = "phlink_adblock_check.rs"
+-  sources = [ "phlink_adblock_check.rs" ]
++  allow_unsafe = true  # cxx underpinning.
++  crate_root = "phlink_adblock_ffi.rs"
++  sources = [ "phlink_adblock_ffi.rs" ]
++  cxx_bindings = [ "phlink_adblock_ffi.rs" ]
++  visibility = [ ":*" ]
+   deps = [ "//third_party/rust/adblock/v0_12:lib" ]
+ }
++
++# C++ surface — the only target that should appear as a dep elsewhere in
++# //chrome (once 5-03 wires the URLLoaderThrottle).
++source_set("phlink_adblock") {
++  testonly = true
++  sources = [
++    "phlink_adblock.cc",
++    "phlink_adblock.h",
++  ]
++  public_deps = [ ":phlink_adblock_ffi" ]
++}
++
++source_set("unit_tests") {
++  testonly = true
++  sources = [ "phlink_adblock_unittest.cc" ]
++  deps = [
++    ":phlink_adblock",
++    "//testing/gtest",
++  ]
++}
++
++# Standalone gtest binary so `autoninja phlink_adblock_unittests` produces
++# a runnable artifact without needing to link the entire chrome unit_tests.
++test("phlink_adblock_unittests") {
++  deps = [
++    ":unit_tests",
++    "//base/test:run_all_unittests",
++  ]
++}
+diff --git a/chrome/browser/phlink/adblock/phlink_adblock.cc b/chrome/browser/phlink/adblock/phlink_adblock.cc
+new file mode 100644
+index 0000000000000..b6f613d4e6399
+--- /dev/null
++++ b/chrome/browser/phlink/adblock/phlink_adblock.cc
+@@ -0,0 +1,55 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/phlink/adblock/phlink_adblock.h"
++
++#include <string>
++#include <utility>
++
++namespace phlink::adblock {
++
++namespace {
++
++// `cxx` exposes `&str` parameters as `::rust::Str`. Wrap a `string_view`
++// without copying.
++::rust::Str ToRustStr(std::string_view sv) {
++  return ::rust::Str(sv.data(), sv.size());
++}
++
++}  // namespace
++
++Engine::Engine(::rust::Box<EngineHandle> handle) : handle_(std::move(handle)) {}
++
++Engine::~Engine() = default;
++
++// static
++std::unique_ptr<Engine> Engine::CreateEmpty() {
++  return std::unique_ptr<Engine>(new Engine(engine_new_empty()));
++}
++
++// static
++std::unique_ptr<Engine> Engine::CreateFromRules(std::string_view rules) {
++  return std::unique_ptr<Engine>(
++      new Engine(engine_new_from_rules(ToRustStr(rules))));
++}
++
++Engine::Decision Engine::ShouldBlock(std::string_view url,
++                                     std::string_view source_url,
++                                     std::string_view request_type) const {
++  BlockDecision raw = engine_should_block(*handle_, ToRustStr(url),
++                                          ToRustStr(source_url),
++                                          ToRustStr(request_type));
++  Decision out;
++  out.matched = raw.matched;
++  out.important = raw.important;
++  if (raw.has_redirect) {
++    out.redirect = std::string(raw.redirect);
++  }
++  if (raw.has_exception) {
++    out.exception = std::string(raw.exception);
++  }
++  return out;
++}
++
++}  // namespace phlink::adblock
+diff --git a/chrome/browser/phlink/adblock/phlink_adblock.h b/chrome/browser/phlink/adblock/phlink_adblock.h
+new file mode 100644
+index 0000000000000..e2fbbfb7efe66
+--- /dev/null
++++ b/chrome/browser/phlink/adblock/phlink_adblock.h
+@@ -0,0 +1,71 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_PHLINK_ADBLOCK_PHLINK_ADBLOCK_H_
++#define CHROME_BROWSER_PHLINK_ADBLOCK_PHLINK_ADBLOCK_H_
++
++#include <memory>
++#include <string>
++#include <string_view>
++
++// Pulls in `::rust::Box` and the cxx-generated `phlink::adblock::EngineHandle`
++// opaque type used as `Box`'s template parameter below.
++#include "chrome/browser/phlink/adblock/phlink_adblock_ffi.rs.h"
++
++namespace phlink::adblock {
++
++// Thin C++ owner of an `adblock::Engine` constructed in Rust.
++//
++// Phase 5-02 surface: just enough to answer "should this URL be blocked
++// under these rules?" so plan 5-03 can plug it into a URLLoaderThrottle.
++//
++// Thread-safety: this build of `adblock-rust` is compiled with
++// `default-features = false` (i.e. without `single-thread`), so the
++// underlying engine wraps its mutable state in `std::sync::Mutex`.
++// `Engine` therefore makes `&self` calls safe from multiple threads;
++// concurrent calls will serialize on the mutex. That is acceptable for
++// 5-02 (correctness over throughput); 5-03 may layer a per-thread cached
++// `Engine` if benchmarks justify it.
++class Engine {
++ public:
++  // Decision returned by `ShouldBlock`. Mirrors the Rust-side
++  // `BlockDecision`, but in plain C++ types so callers don't need to
++  // touch `cxx::String`.
++  struct Decision {
++    bool matched = false;
++    bool important = false;
++    std::string redirect;   // Empty if none.
++    std::string exception;  // Empty if none.
++  };
++
++  // Builds an empty engine. `ShouldBlock` will always return
++  // `matched=false`. Useful for tests and for the
++  // "adblock-disabled-but-wired" runtime state.
++  static std::unique_ptr<Engine> CreateEmpty();
++
++  // Builds an engine from a textual filter list (one rule per line, in the
++  // EasyList / uBO syntax that `adblock-rust` accepts). Parsing is
++  // total: malformed lines are silently skipped by the Rust side.
++  static std::unique_ptr<Engine> CreateFromRules(std::string_view rules);
++
++  Engine(const Engine&) = delete;
++  Engine& operator=(const Engine&) = delete;
++  ~Engine();
++
++  // Asks the engine whether `url` (loaded from `source_url`, with the
++  // adblock-rust `request_type` vocabulary, e.g. `"script"`) should be
++  // blocked. On a malformed URL the call fails open: `matched=false`.
++  Decision ShouldBlock(std::string_view url,
++                       std::string_view source_url,
++                       std::string_view request_type) const;
++
++ private:
++  explicit Engine(::rust::Box<EngineHandle> handle);
++
++  ::rust::Box<EngineHandle> handle_;
++};
++
++}  // namespace phlink::adblock
++
++#endif  // CHROME_BROWSER_PHLINK_ADBLOCK_PHLINK_ADBLOCK_H_
+diff --git a/chrome/browser/phlink/adblock/phlink_adblock_check.rs b/chrome/browser/phlink/adblock/phlink_adblock_check.rs
+deleted file mode 100644
+index 94e4b0a370386..0000000000000
+--- a/chrome/browser/phlink/adblock/phlink_adblock_check.rs
++++ /dev/null
+@@ -1,17 +0,0 @@
+-// Copyright 2026 The phlink Authors
+-// Use of this source code is governed by a BSD-style license that can be
+-// found in the LICENSE file.
+-//
+-// Smoke test: instantiates a minimal `adblock::Engine` to prove the
+-// vendored crate links and its public API surface is visible. Replaced
+-// by the real adblock service in phlink phase 5-02+.
+-
+-fn main() {
+-    let rules: [&str; 0] = [];
+-    let engine = adblock::Engine::from_rules(
+-        rules,
+-        adblock::lists::ParseOptions::default(),
+-    );
+-    let _ = std::hint::black_box(engine);
+-    println!("phlink_adblock_check: ok");
+-}
+diff --git a/chrome/browser/phlink/adblock/phlink_adblock_ffi.rs b/chrome/browser/phlink/adblock/phlink_adblock_ffi.rs
+new file mode 100644
+index 0000000000000..b5443a5bb75e2
+--- /dev/null
++++ b/chrome/browser/phlink/adblock/phlink_adblock_ffi.rs
+@@ -0,0 +1,118 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++//! `cxx::bridge` glue between phlink's C++ adblock surface and the
++//! vendored [`adblock`] crate (Brave's `adblock-rust`, MPL-2.0).
++//!
++//! Phase 5-02 deliverable: a minimal, single-thread-safe (because we use the
++//! `Mutex`-protected, non-`single-thread` build of the engine) wrapper that
++//! lets C++ ask "should this network request be blocked?" given a set of
++//! filter-list rules. Higher-level concerns (URL-loader interception,
++//! cosmetic filtering, list management, prefs) land in 5-03..05.
++
++use adblock::lists::ParseOptions;
++use adblock::request::Request;
++use adblock::Engine;
++
++#[cxx::bridge(namespace = "phlink::adblock")]
++mod ffi {
++    /// Result of consulting the engine for a single network request.
++    ///
++    /// Only `matched` is consumed by callers in 5-02; the additional fields
++    /// are surfaced now so the Mojo / interceptor work in 5-03 doesn't need
++    /// another FFI roundtrip when it starts honoring `important` and
++    /// `redirect`.
++    #[derive(Debug)]
++    pub struct BlockDecision {
++        pub matched: bool,
++        pub important: bool,
++        pub has_redirect: bool,
++        pub redirect: String,
++        pub has_exception: bool,
++        pub exception: String,
++    }
++
++    extern "Rust" {
++        type EngineHandle;
++
++        /// Builds a new engine from a `\n`-separated rule list (the same
++        /// textual format used by EasyList / EasyPrivacy / uBO defaults).
++        ///
++        /// Returns an opaque handle. The Rust side performs all parsing and
++        /// optimization; the C++ side never sees the engine's internals.
++        fn engine_new_from_rules(rules: &str) -> Box<EngineHandle>;
++
++        /// Builds an empty engine — useful for tests and for the "adblock
++        /// disabled, but the wrapper is still wired" runtime state.
++        fn engine_new_empty() -> Box<EngineHandle>;
++
++        /// Asks the engine whether a request should be blocked.
++        ///
++        /// `request_type` follows adblock-rust's vocabulary
++        /// (`document`, `subdocument`, `script`, `stylesheet`, `image`,
++        /// `font`, `xmlhttprequest`, `websocket`, `media`, `ping`, `other`).
++        ///
++        /// On a malformed URL the call returns a `BlockDecision` with
++        /// `matched = false` so the caller fails open (allow). Per
++        /// PRD §6, blocking failures must never break navigation.
++        fn engine_should_block(
++            engine: &EngineHandle,
++            url: &str,
++            source_url: &str,
++            request_type: &str,
++        ) -> BlockDecision;
++    }
++}
++
++/// Newtype wrapper so `cxx` can pass an opaque type across the bridge
++/// without exposing `adblock::Engine`'s public surface to C++.
++pub struct EngineHandle(Engine);
++
++fn engine_new_empty() -> Box<EngineHandle> {
++    Box::new(EngineHandle(Engine::default()))
++}
++
++fn engine_new_from_rules(rules: &str) -> Box<EngineHandle> {
++    let lines: Vec<&str> = rules.lines().collect();
++    let engine = Engine::from_rules(lines, ParseOptions::default());
++    Box::new(EngineHandle(engine))
++}
++
++fn engine_should_block(
++    engine: &EngineHandle,
++    url: &str,
++    source_url: &str,
++    request_type: &str,
++) -> ffi::BlockDecision {
++    let request = match Request::new(url, source_url, request_type) {
++        Ok(r) => r,
++        Err(_) => {
++            return ffi::BlockDecision {
++                matched: false,
++                important: false,
++                has_redirect: false,
++                redirect: String::new(),
++                has_exception: false,
++                exception: String::new(),
++            };
++        }
++    };
++    let r = engine.0.check_network_request(&request);
++    let (has_redirect, redirect) = match r.redirect {
++        Some(s) => (true, s),
++        None => (false, String::new()),
++    };
++    let (has_exception, exception) = match r.exception {
++        Some(s) => (true, s),
++        None => (false, String::new()),
++    };
++    ffi::BlockDecision {
++        matched: r.matched,
++        important: r.important,
++        has_redirect,
++        redirect,
++        has_exception,
++        exception,
++    }
++}
+diff --git a/chrome/browser/phlink/adblock/phlink_adblock_unittest.cc b/chrome/browser/phlink/adblock/phlink_adblock_unittest.cc
+new file mode 100644
+index 0000000000000..93eba10004b82
+--- /dev/null
++++ b/chrome/browser/phlink/adblock/phlink_adblock_unittest.cc
+@@ -0,0 +1,67 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/phlink/adblock/phlink_adblock.h"
++
++#include <memory>
++
++#include "testing/gtest/include/gtest/gtest.h"
++
++namespace phlink::adblock {
++namespace {
++
++TEST(PhlinkAdblockEngineTest, EmptyEngineBlocksNothing) {
++  auto engine = Engine::CreateEmpty();
++  ASSERT_TRUE(engine);
++  auto decision = engine->ShouldBlock("https://example.com/script.js",
++                                      "https://example.com/", "script");
++  EXPECT_FALSE(decision.matched);
++  EXPECT_FALSE(decision.important);
++  EXPECT_TRUE(decision.redirect.empty());
++  EXPECT_TRUE(decision.exception.empty());
++}
++
++TEST(PhlinkAdblockEngineTest, MalformedUrlFailsOpen) {
++  auto engine = Engine::CreateEmpty();
++  // adblock-rust rejects malformed URLs; the wrapper must not propagate
++  // that as a "block" decision (per PRD §6: never break navigation).
++  auto decision = engine->ShouldBlock("not a url", "also not a url", "script");
++  EXPECT_FALSE(decision.matched);
++}
++
++TEST(PhlinkAdblockEngineTest, SimpleHostBlock) {
++  // EasyList-style host rule: block every request to ad.example.invalid.
++  auto engine = Engine::CreateFromRules("||ad.example.invalid^");
++  ASSERT_TRUE(engine);
++
++  auto blocked = engine->ShouldBlock("https://ad.example.invalid/track.js",
++                                     "https://news.example.test/", "script");
++  EXPECT_TRUE(blocked.matched);
++
++  auto allowed = engine->ShouldBlock("https://news.example.test/article.js",
++                                     "https://news.example.test/", "script");
++  EXPECT_FALSE(allowed.matched);
++}
++
++TEST(PhlinkAdblockEngineTest, ExceptionRuleAllowsRequest) {
++  // Block all script on the host, then add an exception for one path.
++  auto engine = Engine::CreateFromRules(
++      "||tracker.example.invalid^$script\n"
++      "@@||tracker.example.invalid/legit.js^$script");
++  ASSERT_TRUE(engine);
++
++  auto blocked = engine->ShouldBlock(
++      "https://tracker.example.invalid/spy.js",
++      "https://news.example.test/", "script");
++  EXPECT_TRUE(blocked.matched);
++
++  auto allowed = engine->ShouldBlock(
++      "https://tracker.example.invalid/legit.js",
++      "https://news.example.test/", "script");
++  EXPECT_FALSE(allowed.matched);
++  EXPECT_FALSE(allowed.exception.empty());
++}
++
++}  // namespace
++}  // namespace phlink::adblock
+diff --git a/third_party/rust/adblock/v0_12/BUILD.gn b/third_party/rust/adblock/v0_12/BUILD.gn
+index 1bb6059844808..2339c82a68dba 100644
+--- a/third_party/rust/adblock/v0_12/BUILD.gn
++++ b/third_party/rust/adblock/v0_12/BUILD.gn
+@@ -91,10 +91,8 @@ cargo_crate("lib") {
+   ]
+   features = [
+     "addr",
+-    "default",
+     "embedded-domain-resolver",
+     "full-regex-handling",
+-    "single-thread",
+   ]
+ 
+   testonly = true
+diff --git a/third_party/rust/chromium_crates_io/Cargo.toml b/third_party/rust/chromium_crates_io/Cargo.toml
+index 84b80d517d437..ec3f875b58527 100644
+--- a/third_party/rust/chromium_crates_io/Cargo.toml
++++ b/third_party/rust/chromium_crates_io/Cargo.toml
+@@ -16,7 +16,7 @@ version = "0.1.0"
+ [workspace]
+ 
+ [dependencies]
+-adblock = "0.12.2"
++adblock = { version = "0.12.2", default-features = false, features = ["embedded-domain-resolver", "full-regex-handling"] }
+ ahash = "0.8.12" #TODO(crbug.com/496920769): Remove once libafl is added as a dependency.
+ aho-corasick = "1.1.4" #TODO(crbug.com/496920769): Remove once libafl is added as a dependency.
+ antlr4rust = "0.5.2"
+-- 
+2.50.1 (Apple Git-155)
+
