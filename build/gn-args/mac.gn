@@ -3,8 +3,9 @@
 # macOS build args. Imports the common baseline.
 
 target_os = "mac"
-# Use the host's default arch; users on Apple Silicon should set target_cpu = "arm64"
-# explicitly. We don't lock it here.
+# Apple Silicon is the assumed dev target; override on x86_64 hosts via
+# `gn gen --args='target_cpu="x64"'`.
+target_cpu = "arm64"
 
 # Don't bundle proprietary codecs by default.
 proprietary_codecs = false

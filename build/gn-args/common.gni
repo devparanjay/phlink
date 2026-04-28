@@ -41,6 +41,12 @@ is_chrome_for_testing_branded = false
 # External contributors don't have access to Reclient
 use_remoteexec = false
 
+# Use sccache as a compile-cache wrapper. Required for incremental builds to
+# stay sane on a single workstation; install via `brew install sccache` on
+# macOS or `cargo install sccache` elsewhere. Make sure SCCACHE_DIR has
+# enough headroom (Chromium needs ~50 GB cold).
+cc_wrapper = "sccache"
+
 # ---------------------------------------------------------------------------
 # Phase 3 — Identity & services strip
 #
@@ -49,8 +55,12 @@ use_remoteexec = false
 # is_chrome_branded=false but we keep them explicit so a future rebase can't
 # silently re-enable them.
 
-# No Safe Browsing v4 phone-home (PRD §3 hard rule).
-safe_browsing_mode = 0
+# Safe Browsing: kept at upstream default. Brave-style safe_browsing_mode=0
+# breaks dep resolution for unit_tests/browser_tests targets (~30 patch
+# files needed to fix the assertions). Runtime SB pings already need
+# Google API keys (which we don't ship) and are neutered by Phase 4
+# enable_reporting=false. A dedicated phase will revisit a full strip.
+# safe_browsing_mode = 0  (deferred)
 
 # No bundled Widevine CDM by default. (Already false when unbranded; pinned.)
 enable_widevine = false
@@ -61,16 +71,17 @@ enable_remoting = false
 # No Hangouts services extension (legacy GoogleMeet hooks).
 enable_hangout_services_extension = false
 
-# No Family Link / supervised user plumbing.
-enable_supervised_users = false
+# enable_supervised_users: left at upstream default (true). Setting it
+# false is asserted on by 6+ //chrome/ BUILD.gn files; the surface is
+# already inert when is_chrome_branded=false (no Family Link sign-in,
+# no Google API keys). Revisit in a later phase as a binary-size lever.
 
 # No field-trial testing config baked into the binary (would phone home).
 disable_fieldtrial_testing_config = true
 
-# No bundled Cast Receiver (the pre-installed "this device is castable" path).
-# Cast *sender* (chrome://cast UI) stays available; we only opt out of
-# being a receiver target.
-cast_allow_developer_certificate = false
+# No bundled Cast Receiver: cast_allow_developer_certificate was removed
+# upstream (no longer in declare_args). Cast sender (the chrome://cast UI)
+# is governed by chrome_branded; we already have is_chrome_branded=false.
 
 # ---------------------------------------------------------------------------
 # Phase 4 — Telemetry-Free Defaults

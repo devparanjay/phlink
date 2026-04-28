@@ -15,7 +15,7 @@ Per-platform tooling:
 
 | Platform | What you need |
 |---|---|
-| **macOS 12+** | Xcode + command line tools (`xcode-select --install`). Apple Silicon (`arm64`) and Intel both work. |
+| **macOS 12+** | Xcode + command line tools (`xcode-select --install`) **and** the Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`). Apple Silicon (`arm64`) and Intel both work. |
 | **Linux** | A glibc distro on `x86_64`. Ubuntu 22.04+ is the smoothest. Required system packages are installed by depot_tools' `install-build-deps.sh` (see below). |
 | **Windows 10/11 (x64)** | Visual Studio 2022 (Community is fine) with the "Desktop development with C++" workload, the Windows 11 SDK (10.0.22621.x), and the WDK. PowerShell 7+. |
 
@@ -178,3 +178,34 @@ gn gen ../chromium-src/src/out/Default
 ## What's next
 
 Once you have a working binary, see [docs/dev/upstream-tracking.md](upstream-tracking.md) for how phlink stays in sync with Chromium stable and how to author a new patch.
+
+## First-build constraints (recorded 2026-04-28, Phase 4.5)
+
+A few GN flags listed in PRD §10.1 turned out to need follow-up work
+before they can land. They are **not** in `build/gn-args/common.gni`
+today, and a dedicated phase will revisit each:
+
+- `safe_browsing_mode = 0` — breaks `gn gen` because `unit_tests`,
+  `interactive_ui_tests`, `browser_tests`, and several `chrome/`
+  binaries declare hard deps on `//components/safe_browsing/...`
+  targets that vanish when the flag is 0. Brave-style strip needs
+  ~30 small patches across `chrome/test/`, `chrome/browser/`, and
+  `extensions/`. Runtime SB upload is already neutered by
+  `is_chrome_branded=false` (no Google API keys) and by Phase 4
+  `enable_reporting=false`.
+
+- `enable_supervised_users = false` — asserted on by 6+ `BUILD.gn`
+  files in `chrome/test/`, `chrome/common/`, `chrome/renderer/`,
+  `chrome/browser/`, `chrome/browser/ui/`,
+  `chrome/browser/extensions/`. The Family Link surface is inert
+  without Google sign-in (no API keys, no branding) so the
+  binary-size cost of leaving it `true` is acceptable for now.
+
+- `cast_allow_developer_certificate = false` — was removed from
+  `declare_args` upstream; passing it produces a "no effect"
+  warning. Cast Receiver is gated on `is_chrome_branded` which is
+  already `false`.
+
+When picking up the SB strip, the entrypoint is
+`//chrome/test/BUILD.gn:59` and the dep graph it pulls in.
+
