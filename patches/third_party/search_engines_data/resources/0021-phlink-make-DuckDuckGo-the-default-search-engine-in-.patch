@@ -1,0 +1,1173 @@
+From: phlink <phlink@local>
+Subject: [PATCH] phlink: make DuckDuckGo the default search engine in every
+ region
+
+Reorders search_engines[] in regional_settings.json so &duckduckgo is
+the first entry (== default per template_url_prepopulate_data.cc) for
+every country. Inserts &duckduckgo where it was previously absent.
+
+102 country blocks updated. Patch slot 0021/0030 of Phase 3.
+Refs phlink SRCH-01 (DuckDuckGo default per PRD section 10.1).
+---
+ definitions/regional_settings.json | 256 ++++++++++++++---------------
+ 1 file changed, 128 insertions(+), 128 deletions(-)
+
+diff --git a/definitions/regional_settings.json b/definitions/regional_settings.json
+index 45b3734..e1a6e84 100644
+--- a/definitions/regional_settings.json
++++ b/definitions/regional_settings.json
+@@ -6,39 +6,39 @@
+     "AE": {
+       // United Arab Emirates
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo",
+-        "&yandex_ru",
+-        "&duckduckgo"
++        "&yandex_ru"
+       ]
+     },
+     "AL": {
+       // Albania
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo",
+-        "&yandex_tr",
+-        "&duckduckgo"
++        "&yandex_tr"
+       ]
+     },
+     "AR": {
+       // Armenia
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo_ar",
+-        "&duckduckgo",
+         "&yandex_com"
+       ]
+     },
+     "AT": {
+       // Austria
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&brave",
+-        "&duckduckgo",
+         "&ecosia",
+         "&bing",
+         "&yahoo_at",
+@@ -49,29 +49,29 @@
+     "AU": {
+       // Australia
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo_au",
+-        "&duckduckgo",
+         "&ecosia"
+       ]
+     },
+     "BA": {
+       // Bosnia and Herzegovina
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo",
+-        "&yandex_com",
+-        "&duckduckgo"
++        "&yandex_com"
+       ]
+     },
+     "BE": {
+       // Belgium
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&brave",
+-        "&duckduckgo",
+         "&ecosia",
+         "&bing",
+         "&qwant",
+@@ -82,9 +82,9 @@
+     "BG": {
+       // Bulgaria
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&brave",
+-        "&duckduckgo",
+         "&bing",
+         "&yep",
+         "&ecosia",
+@@ -95,69 +95,69 @@
+     "BH": {
+       // Bahrain
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo",
+-        "&yandex_com",
+-        "&duckduckgo"
++        "&yandex_com"
+       ]
+     },
+     "BI": {
+       // Burundi
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo",
+-        "&yandex_ru",
+-        "&duckduckgo"
++        "&yandex_ru"
+       ]
+     },
+     "BN": {
+       // Brunei
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo",
+-        "&duckduckgo",
+         "&yandex_com"
+       ]
+     },
+     "BO": {
+       // Bolivia
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo",
+-        "&yandex_com",
+-        "&duckduckgo"
++        "&yandex_com"
+       ]
+     },
+     "BR": {
+       // Brazil
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo_br",
+-        "&duckduckgo",
+         "&yandex_com"
+       ]
+     },
+     "BY": {
+       // Belarus
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&yandex_by",
+         "&bing",
+-        "&duckduckgo",
+         "&mail_ru"
+       ]
+     },
+     "BZ": {
+       // Belize
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+-        "&duckduckgo",
+         "&yahoo",
+         "&yandex_com"
+       ]
+@@ -165,19 +165,19 @@
+     "CA": {
+       // Canada
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo_ca",
+-        "&duckduckgo",
+         "&yandex_com"
+       ]
+     },
+     "CH": {
+       // Switzerland
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+-        "&duckduckgo",
+         "&yahoo_ch",
+         "&ecosia"
+       ]
+@@ -185,10 +185,10 @@
+     "CL": {
+       // Chile
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo_cl",
+-        "&duckduckgo",
+         "&yandex_com"
+       ]
+     },
+@@ -199,29 +199,29 @@
+     "CO": {
+       // Colombia
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo_co",
+-        "&duckduckgo",
+         "&ecosia"
+       ]
+     },
+     "CR": {
+       // Costa Rica
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo",
+-        "&duckduckgo",
+         "&yandex_com"
+       ]
+     },
+     "CY": {
+       // Republic of Cyprus
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&brave",
+-        "&duckduckgo",
+         "&bing",
+         "&ecosia",
+         "&qwant",
+@@ -232,10 +232,10 @@
+     "CZ": {
+       // Czechia
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&seznam",
+         "&brave",
+-        "&duckduckgo",
+         "&bing",
+         "&ecosia",
+         "&privacywall",
+@@ -245,8 +245,8 @@
+     "DE": {
+       // Germany
+       "search_engines": [
+-        "&google",
+         "&duckduckgo",
++        "&google",
+         "&brave",
+         "&ecosia",
+         "&bing",
+@@ -258,9 +258,9 @@
+     "DK": {
+       // Denmark
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&brave",
+-        "&duckduckgo",
+         "&bing",
+         "&ecosia",
+         "&qwant",
+@@ -271,39 +271,39 @@
+     "DO": {
+       // Dominican Republic
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo",
+-        "&duckduckgo",
+         "&yandex_com"
+       ]
+     },
+     "DZ": {
+       // Algeria
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo_fr",
+-        "&yandex_com",
+-        "&duckduckgo"
++        "&yandex_com"
+       ]
+     },
+     "EC": {
+       // Ecuador
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo_es",
+-        "&duckduckgo",
+         "&ecosia"
+       ]
+     },
+     "EE": {
+       // Estonia
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&brave",
+-        "&duckduckgo",
+         "&bing",
+         "&ecosia",
+         "&privacywall",
+@@ -314,19 +314,19 @@
+     "EG": {
+       // Egypt
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo",
+-        "&yandex_com",
+-        "&duckduckgo"
++        "&yandex_com"
+       ]
+     },
+     "ES": {
+       // Spain
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&brave",
+-        "&duckduckgo",
+         "&bing",
+         "&ecosia",
+         "&yahoo_es",
+@@ -337,9 +337,9 @@
+     "FI": {
+       // Finland
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&brave",
+-        "&duckduckgo",
+         "&bing",
+         "&ecosia",
+         "&qwant",
+@@ -350,21 +350,21 @@
+     "FO": {
+       // Faroe Islands
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo_uk",
+-        "&duckduckgo",
+         "&ecosia"
+       ]
+     },
+     "FR": {
+       // France
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&brave",
+         "&ecosia",
+         "&qwant",
+-        "&duckduckgo",
+         "&bing",
+         "&yahoo_fr",
+         "&privacywall"
+@@ -373,19 +373,19 @@
+     "GB": {
+       // United Kingdom
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo_uk",
+-        "&duckduckgo",
+         "&ecosia"
+       ]
+     },
+     "GR": {
+       // Greece
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&brave",
+-        "&duckduckgo",
+         "&bing",
+         "&yahoo_emea",
+         "&ecosia",
+@@ -396,10 +396,10 @@
+     "GT": {
+       // Guatemala
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo",
+-        "&duckduckgo",
+         "&yandex_com"
+       ]
+     },
+@@ -410,19 +410,19 @@
+     "HN": {
+       // Honduras
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo",
+-        "&duckduckgo",
+         "&yandex_com"
+       ]
+     },
+     "HR": {
+       // Croatia
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&brave",
+-        "&duckduckgo",
+         "&bing",
+         "&ecosia",
+         "&yep",
+@@ -433,10 +433,10 @@
+     "HU": {
+       // Hungary
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&brave",
+         "&bing",
+-        "&duckduckgo",
+         "&ecosia",
+         "&yep",
+         "&qwant",
+@@ -446,18 +446,18 @@
+     "ID": {
+       // Indonesia
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&yandex_com",
+         "&bing",
+-        "&yahoo_id",
+-        "&duckduckgo"
++        "&yahoo_id"
+       ]
+     },
+     "IE": {
+       // Ireland
+       "search_engines": [
+-        "&google",
+         "&duckduckgo",
++        "&google",
+         "&brave",
+         "&bing",
+         "&yahoo_uk",
+@@ -469,48 +469,48 @@
+     "IL": {
+       // Israel
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yandex_ru",
+-        "&yahoo",
+-        "&duckduckgo"
++        "&yahoo"
+       ]
+     },
+     "IN": {
+       // India
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo_in",
+-        "&duckduckgo",
+         "&yandex_com"
+       ]
+     },
+     "IQ": {
+       // Iraq
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yandex_tr",
+-        "&yahoo",
+-        "&duckduckgo"
++        "&yahoo"
+       ]
+     },
+     "IR": {
+       // Iran
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo",
+-        "&duckduckgo",
+         "&yandex_com"
+       ]
+     },
+     "IS": {
+       // Iceland
+       "search_engines": [
+-        "&google",
+         "&duckduckgo",
++        "&google",
+         "&brave",
+         "&bing",
+         "&ecosia",
+@@ -522,10 +522,10 @@
+     "IT": {
+       // Italy
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&brave",
+         "&bing",
+-        "&duckduckgo",
+         "&ecosia",
+         "&yahoo_it",
+         "&qwant",
+@@ -535,40 +535,40 @@
+     "JM": {
+       // Jamaica
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo",
+-        "&duckduckgo",
+         "&yandex_com"
+       ]
+     },
+     "JO": {
+       // Jordan
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo",
+-        "&yandex_com",
+-        "&duckduckgo"
++        "&yandex_com"
+       ]
+     },
+     "JP": {
+       // Japan
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&yahoo_jp",
+         "&bing",
+-        "&duckduckgo",
+         "&ecosia"
+       ]
+     },
+     "KE": {
+       // Kenya
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo",
+-        "&duckduckgo",
+         "&yandex_com"
+       ]
+     },
+@@ -579,11 +579,11 @@
+     "KW": {
+       // Kuwait
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yandex_tr",
+-        "&yahoo",
+-        "&duckduckgo"
++        "&yahoo"
+       ]
+     },
+     "KZ": {
+@@ -593,18 +593,18 @@
+     "LB": {
+       // Lebanon
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo",
+-        "&duckduckgo",
+         "&yandex_com"
+       ]
+     },
+     "LI": {
+       // Liechtenstein
+       "search_engines": [
+-        "&google",
+         "&duckduckgo",
++        "&google",
+         "&brave",
+         "&bing",
+         "&ecosia",
+@@ -616,9 +616,9 @@
+     "LT": {
+       // Lithuania
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&brave",
+-        "&duckduckgo",
+         "&bing",
+         "&ecosia",
+         "&qwant",
+@@ -629,9 +629,9 @@
+     "LU": {
+       // Luxembourg
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&brave",
+-        "&duckduckgo",
+         "&bing",
+         "&ecosia",
+         "&qwant",
+@@ -642,9 +642,9 @@
+     "LV": {
+       // Latvia
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&brave",
+-        "&duckduckgo",
+         "&bing",
+         "&ecosia",
+         "&privacywall",
+@@ -655,70 +655,70 @@
+     "LY": {
+       // Libya
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yandex_tr",
+-        "&yahoo",
+-        "&duckduckgo"
++        "&yahoo"
+       ]
+     },
+     "MA": {
+       // Morocco
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo_fr",
+-        "&yandex_com",
+-        "&duckduckgo"
++        "&yandex_com"
+       ]
+     },
+     "MC": {
+       // Monaco
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo_fr",
+-        "&duckduckgo",
+         "&yandex_com"
+       ]
+     },
+     "MD": {
+       // Moldova
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&yandex_ru",
+         "&bing",
+-        "&duckduckgo",
+         "&mail_ru"
+       ]
+     },
+     "ME": {
+       // Montenegro
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yandex_ru",
+-        "&yahoo",
+-        "&duckduckgo"
++        "&yahoo"
+       ]
+     },
+     "MK": {
+       // Macedonia
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo",
+-        "&yandex_com",
+-        "&duckduckgo"
++        "&yandex_com"
+       ]
+     },
+     "MT": {
+       // Malta
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&brave",
+         "&bing",
+-        "&duckduckgo",
+         "&ecosia",
+         "&privacywall",
+         "&yahoo_emea",
+@@ -728,38 +728,38 @@
+     "MX": {
+       // Mexico
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo_mx",
+-        "&duckduckgo",
+         "&ecosia"
+       ]
+     },
+     "MY": {
+       // Malaysia
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo_my",
+-        "&yandex_com",
+-        "&duckduckgo"
++        "&yandex_com"
+       ]
+     },
+     "NI": {
+       // Nicaragua
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo",
+-        "&duckduckgo",
+         "&yandex_com"
+       ]
+     },
+     "NL": {
+       // Netherlands
+       "search_engines": [
+-        "&google",
+         "&duckduckgo",
++        "&google",
+         "&brave",
+         "&bing",
+         "&ecosia",
+@@ -771,8 +771,8 @@
+     "NO": {
+       // Norway
+       "search_engines": [
+-        "&google",
+         "&duckduckgo",
++        "&google",
+         "&brave",
+         "&bing",
+         "&ecosia",
+@@ -784,69 +784,69 @@
+     "NZ": {
+       // New Zealand
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo_nz",
+-        "&duckduckgo",
+         "&ecosia"
+       ]
+     },
+     "OM": {
+       // Oman
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo",
+-        "&duckduckgo",
+         "&yandex_com"
+       ]
+     },
+     "PA": {
+       // Panama
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo_es",
+-        "&duckduckgo",
+         "&yandex_com"
+       ]
+     },
+     "PE": {
+       // Peru
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo_pe",
+-        "&yandex_com",
+-        "&duckduckgo"
++        "&yandex_com"
+       ]
+     },
+     "PH": {
+       // Philippines
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo_ph",
+-        "&ecosia",
+-        "&duckduckgo"
++        "&ecosia"
+       ]
+     },
+     "PK": {
+       // Pakistan
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo",
+-        "&duckduckgo",
+         "&yandex_com"
+       ]
+     },
+     "PL": {
+       // Poland
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&brave",
+-        "&duckduckgo",
+         "&bing",
+         "&ecosia",
+         "&yahoo_emea",
+@@ -857,20 +857,20 @@
+     "PR": {
+       // Puerto Rico
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo",
+-        "&duckduckgo",
+         "&yandex_com"
+       ]
+     },
+     "PT": {
+       // Portugal
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&brave",
+         "&bing",
+-        "&duckduckgo",
+         "&ecosia",
+         "&yep",
+         "&qwant",
+@@ -880,29 +880,29 @@
+     "PY": {
+       // Paraguay
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo_es",
+-        "&duckduckgo",
+         "&yandex_com"
+       ]
+     },
+     "QA": {
+       // Quatar
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo",
+-        "&duckduckgo",
+         "&yandex_tr"
+       ]
+     },
+     "RO": {
+       // Romania
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&brave",
+-        "&duckduckgo",
+         "&bing",
+         "&yahoo_emea",
+         "&ecosia",
+@@ -913,48 +913,48 @@
+     "RS": {
+       // Serbia
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo",
+-        "&yandex_ru",
+-        "&duckduckgo"
++        "&yandex_ru"
+       ]
+     },
+     "RU": {
+       // Russia
+       "search_engines": [
++        "&duckduckgo",
+         "&yandex_ru",
+         "&google",
+         "&bing",
+-        "&duckduckgo",
+         "&mail_ru"
+       ]
+     },
+     "RW": {
+       // Rwanda
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo",
+-        "&duckduckgo",
+         "&yandex_com"
+       ]
+     },
+     "SA": {
+       // Saudi Arabia
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yandex_com",
+-        "&yahoo",
+-        "&duckduckgo"
++        "&yahoo"
+       ]
+     },
+     "SE": {
+       // Sweden
+       "search_engines": [
+-        "&google",
+         "&duckduckgo",
++        "&google",
+         "&brave",
+         "&bing",
+         "&ecosia",
+@@ -966,19 +966,19 @@
+     "SG": {
+       // Singapore
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo_sg",
+-        "&duckduckgo",
+         "&yandex_com"
+       ]
+     },
+     "SI": {
+       // Slovenia
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&brave",
+-        "&duckduckgo",
+         "&bing",
+         "&ecosia",
+         "&yep",
+@@ -989,9 +989,9 @@
+     "SK": {
+       // Slovakia
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&brave",
+-        "&duckduckgo",
+         "&bing",
+         "&seznam",
+         "&ecosia",
+@@ -1002,60 +1002,60 @@
+     "SV": {
+       // El Salvador
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo_es",
+-        "&duckduckgo",
+         "&yandex_com"
+       ]
+     },
+     "SY": {
+       // Syria
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yandex_ru",
+-        "&yahoo",
+-        "&duckduckgo"
++        "&yahoo"
+       ]
+     },
+     "TH": {
+       // Thailand
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo_th",
+-        "&yandex_com",
+-        "&duckduckgo"
++        "&yandex_com"
+       ]
+     },
+     "TN": {
+       // Tunisia
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo_fr",
+-        "&yandex_com",
+-        "&duckduckgo"
++        "&yandex_com"
+       ]
+     },
+     "TR": {
+       // Turkey
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&yandex_tr",
+         "&yahoo_tr",
+-        "&bing",
+-        "&duckduckgo"
++        "&bing"
+       ]
+     },
+     "TT": {
+       // Trinidad and Tobago
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo",
+-        "&duckduckgo",
+         "&yandex_com"
+       ]
+     },
+@@ -1066,8 +1066,8 @@
+     "TZ": {
+       // Tanzania
+       "search_engines": [
+-        "&google",
+         "&duckduckgo",
++        "&google",
+         "&bing",
+         "&yahoo",
+         "&yandex_com"
+@@ -1076,40 +1076,40 @@
+     "UA": {
+       // Ukraine
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&yandex_ru",
+         "&bing",
+-        "&duckduckgo",
+         "&yahoo"
+       ]
+     },
+     "US": {
+       // United States
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo",
+-        "&duckduckgo",
+         "&yandex_com"
+       ]
+     },
+     "UY": {
+       // Uruguay
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo_es",
+-        "&duckduckgo",
+         "&yandex_com"
+       ]
+     },
+     "VE": {
+       // Venezuela
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo_es",
+-        "&duckduckgo",
+         "&yandex_com"
+       ]
+     },
+@@ -1120,20 +1120,20 @@
+     "YE": {
+       // Yemen
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo",
+-        "&duckduckgo",
+         "&yandex_com"
+       ]
+     },
+     "ZA": {
+       // South Africa
+       "search_engines": [
++        "&duckduckgo",
+         "&google",
+         "&bing",
+         "&yahoo",
+-        "&duckduckgo",
+         "&yandex_com"
+       ]
+     },

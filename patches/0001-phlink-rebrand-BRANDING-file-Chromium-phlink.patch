@@ -1,0 +1,34 @@
+From: phlink <phlink@local>
+Subject: [PATCH 1/2] phlink: rebrand BRANDING file (Chromium -> phlink)
+
+Drives most product-string substitutions at build time (mac bundle name,
+installer titles, copyright, etc.). Patch slot 0001/0030 of Phase 3.
+Refs phlink BRND-01.
+---
+ chrome/app/theme/chromium/BRANDING | 18 +++++++++---------
+ 1 file changed, 9 insertions(+), 9 deletions(-)
+
+diff --git a/chrome/app/theme/chromium/BRANDING b/chrome/app/theme/chromium/BRANDING
+index f8363d5b294fe..4ca1d7f2fb54d 100644
+--- a/chrome/app/theme/chromium/BRANDING
++++ b/chrome/app/theme/chromium/BRANDING
+@@ -1,10 +1,10 @@
+-COMPANY_FULLNAME=The Chromium Authors
+-COMPANY_SHORTNAME=The Chromium Authors
+-PRODUCT_FULLNAME=Chromium
+-PRODUCT_SHORTNAME=Chromium
+-PRODUCT_INSTALLER_FULLNAME=Chromium Installer
+-PRODUCT_INSTALLER_SHORTNAME=Chromium Installer
+-COPYRIGHT=Copyright @LASTCHANGE_YEAR@ The Chromium Authors. All rights reserved.
+-MAC_BUNDLE_ID=org.chromium.Chromium
+-MAC_CREATOR_CODE=Cr24
++COMPANY_FULLNAME=phlink contributors
++COMPANY_SHORTNAME=phlink
++PRODUCT_FULLNAME=phlink
++PRODUCT_SHORTNAME=phlink
++PRODUCT_INSTALLER_FULLNAME=phlink Installer
++PRODUCT_INSTALLER_SHORTNAME=phlink Installer
++COPYRIGHT=Copyright @LASTCHANGE_YEAR@ phlink contributors. All rights reserved.
++MAC_BUNDLE_ID=org.phlink.phlink
++MAC_CREATOR_CODE=phlk
+ MAC_TEAM_ID=

@@ -1,0 +1,50 @@
+From: phlink <phlink@local>
+Subject: [PATCH 2/2] phlink: rename IDS_PRODUCT_NAME / IDS_PRODUCT_DESCRIPTION
+ to phlink
+
+Renames the user-visible product strings in the chromium-lane GRD
+(used when is_chrome_branded=false, our locked default). Includes the
+welcome / first-run / Linux ToS dialog strings.
+
+Patch slot 0002/0030 of Phase 3.
+Refs phlink BRND-01, BRND-02.
+---
+ chrome/app/chromium_strings.grd | 10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/chrome/app/chromium_strings.grd b/chrome/app/chromium_strings.grd
+index c7682a0e8c67a..7289b7b5896ae 100644
+--- a/chrome/app/chromium_strings.grd
++++ b/chrome/app/chromium_strings.grd
+@@ -294,10 +294,10 @@ If you update this file, be sure also to update google_chrome_strings.grd. -->
+         </then>
+         <else>
+           <message name="IDS_PRODUCT_NAME" desc="The Chrome application name" translateable="false">
+-            Chromium
++            phlink
+           </message>
+           <message name="IDS_SHORT_PRODUCT_NAME" desc="The Chrome application short name." translateable="false">
+-            Chromium
++            phlink
+           </message>
+         </else>
+       </if>
+@@ -309,15 +309,15 @@ If you update this file, be sure also to update google_chrome_strings.grd. -->
+         <message name="IDS_SHORTCUT_NAME_DEV" desc="Unused in Chromium builds" translateable="false">
+         </message>
+         <message name="IDS_PRODUCT_DESCRIPTION" desc="Browser description">
+-          Chromium is a web browser that runs webpages and applications with lightning speed. It's fast, stable, and easy to use. Browse the web more safely with malware and phishing protection built into Chromium.
++          phlink is an open-source, privacy-first, performance-first web browser. It blocks ads and trackers by default, sends no telemetry, and stays out of your way.
+         </message>
+         <message name="IDS_WELCOME_TO_CHROME" desc="Welcoming text announced via screen readers the first time Chrome is launched at the conclusion of installation.">
+-          Welcome to Chromium; new browser window opened
++          Welcome to phlink; new browser window opened
+         </message>
+       </if>
+       <if expr="is_macosx or is_linux">
+         <message name="IDS_FIRST_RUN_DIALOG_WINDOW_TITLE" desc="Window title of First Run dialog on Mac and Linux, displayed in title bar">
+-          Welcome to Chromium
++          Welcome to phlink
+         </message>
+       </if>
+       <if expr="is_linux">
