@@ -1,0 +1,38 @@
+From 6fa85b3e1c5c25d567c145ab0a0dee8dea260e74 Mon Sep 17 00:00:00 2001
+From: phlink <phlink@local>
+Date: Wed, 29 Apr 2026 02:38:35 +0530
+Subject: [PATCH 10/10] phlink: hard-disable GCM device checkin and
+ registration
+
+GCMClientImpl::StartCheckin() returns at the top without enqueuing
+a CheckinRequest. Stops POSTs to android.clients.google.com/checkin
+and /c2dm/register3 on first launch. v1 ships nothing that needs
+GCM push (sync is local-only per PRD section 10.1, no FCM-using
+extensions). PRD section 3.5, TELM-01.
+---
+ components/gcm_driver/gcm_client_impl.cc | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/components/gcm_driver/gcm_client_impl.cc b/components/gcm_driver/gcm_client_impl.cc
+index d3fb7da106971..6d6e2a728f857 100644
+--- a/components/gcm_driver/gcm_client_impl.cc
++++ b/components/gcm_driver/gcm_client_impl.cc
+@@ -610,6 +610,15 @@ void GCMClientImpl::RemoveHeartbeatInterval(const std::string& scope) {
+ 
+ void GCMClientImpl::StartCheckin() {
+   DCHECK(io_task_runner_->RunsTasksInCurrentSequence());
++  // phlink: hard-disable GCM device checkin and registration. PRD §3.5
++  // (TELM-01). Without this, the browser POSTs to
++  // android.clients.google.com/checkin and /c2dm/register3 on first
++  // launch to enroll for Google Cloud Messaging push, which we do not
++  // ship in v1 (no built-in extensions need it; sync is local-only per
++  // PRD §10.1).
++  if (true) {
++    return;
++  }
+ 
+   // Make sure no checkin is in progress.
+   if (checkin_request_)
+-- 
+2.50.1 (Apple Git-155)
+

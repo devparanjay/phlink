@@ -1,0 +1,37 @@
+From a63bc95aa5ae8e1c3f35221bc17f76ac35f79db8 Mon Sep 17 00:00:00 2001
+From: phlink <phlink@local>
+Date: Wed, 29 Apr 2026 02:38:26 +0530
+Subject: [PATCH 09/10] phlink: hard-disable One Google Bar NTP fetch
+
+OneGoogleBarLoaderImpl::Load() invokes the callback with
+TRANSIENT_ERROR and an empty std::optional, so the NTP renders the
+no-OGB fallback. Stops the GET to www.google.com/async/folae?udm=50
+on every new tab. Phase 8 will wire a phlink-native NTP. PRD
+section 3.5, TELM-01.
+---
+ .../one_google_bar/one_google_bar_loader_impl.cc         | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/chrome/browser/new_tab_page/one_google_bar/one_google_bar_loader_impl.cc b/chrome/browser/new_tab_page/one_google_bar/one_google_bar_loader_impl.cc
+index f378d2a3244ed..d5c777d3093c6 100644
+--- a/chrome/browser/new_tab_page/one_google_bar/one_google_bar_loader_impl.cc
++++ b/chrome/browser/new_tab_page/one_google_bar/one_google_bar_loader_impl.cc
+@@ -300,6 +300,15 @@ OneGoogleBarLoaderImpl::OneGoogleBarLoaderImpl(
+ OneGoogleBarLoaderImpl::~OneGoogleBarLoaderImpl() = default;
+ 
+ void OneGoogleBarLoaderImpl::Load(OneGoogleCallback callback) {
++  // phlink: hard-disable One Google Bar fetch on the NTP. PRD §3.5
++  // (TELM-01). Without this, the NTP fetches
++  // www.google.com/async/folae?udm=50 on every new tab. Phase 8 will
++  // wire a phlink-native NTP; until then, return an empty result so
++  // existing UI paths gracefully render the no-OGB fallback.
++  if (true) {
++    std::move(callback).Run(Status::TRANSIENT_ERROR, std::nullopt);
++    return;
++  }
+   callbacks_.push_back(std::move(callback));
+ 
+   // Note: If there is an ongoing request, abandon it. It's possible that
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,36 @@
+From 79e633afa86c3472f849def5110306b6caddc9d1 Mon Sep 17 00:00:00 2001
+From: phlink <phlink@local>
+Date: Wed, 29 Apr 2026 02:38:16 +0530
+Subject: [PATCH 08/10] phlink: hard-disable GAIA Cookie Manager /ListAccounts
+ ping
+
+GaiaCookieManagerService::TriggerListAccounts() returns immediately
+without enqueueing a request. Stops the GET to
+accounts.google.com/ListAccounts on a clean profile. Sign-in is
+opt-in via Phase 11 sync UX. PRD section 3.5, TELM-01.
+---
+ .../identity_manager/gaia_cookie_manager_service.cc       | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/components/signin/internal/identity_manager/gaia_cookie_manager_service.cc b/components/signin/internal/identity_manager/gaia_cookie_manager_service.cc
+index dc0c1d87e6a9f..117dda23c3316 100644
+--- a/components/signin/internal/identity_manager/gaia_cookie_manager_service.cc
++++ b/components/signin/internal/identity_manager/gaia_cookie_manager_service.cc
+@@ -517,6 +517,14 @@ signin::AccountsInCookieJarInfo GaiaCookieManagerService::ListAccounts() {
+ }
+ 
+ void GaiaCookieManagerService::TriggerListAccounts() {
++  // phlink: hard-disable GAIA Cookie Manager /ListAccounts polling.
++  // PRD §3.5 (TELM-01). Without this, the browser pings
++  // accounts.google.com/ListAccounts on a fresh profile to discover
++  // already-signed-in Google accounts, which we do not want even when
++  // is_chrome_branded=false. Sign-in is opt-in via Phase 11 sync setup.
++  if (true) {
++    return;
++  }
+   // Callers suspect that a check to Gaia needs to be done, don't rely on the
+   // in progress request, conditions might have changed while the request is
+   // in-flight.
+-- 
+2.50.1 (Apple Git-155)
+

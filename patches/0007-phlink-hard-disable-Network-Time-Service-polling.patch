@@ -1,0 +1,34 @@
+From 83384c7be8b98e6218341f8e40cbcbba4e4a545f Mon Sep 17 00:00:00 2001
+From: phlink <phlink@local>
+Date: Wed, 29 Apr 2026 02:38:07 +0530
+Subject: [PATCH 07/10] phlink: hard-disable Network Time Service polling
+
+NetworkTimeTracker::StartTimeFetch() returns false at the very top
+without issuing any HTTP request. Stops the recurring poll to
+clients2.google.com/time/1/current. PRD section 3.5, TELM-01.
+---
+ components/network_time/network_time_tracker.cc | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/components/network_time/network_time_tracker.cc b/components/network_time/network_time_tracker.cc
+index d5f5b2399daeb..caf1e06ef3706 100644
+--- a/components/network_time/network_time_tracker.cc
++++ b/components/network_time/network_time_tracker.cc
+@@ -423,6 +423,14 @@ NetworkTimeTracker::NetworkTimeResult NetworkTimeTracker::GetNetworkTime(
+ 
+ bool NetworkTimeTracker::StartTimeFetch(base::OnceClosure closure) {
+   DCHECK(thread_checker_.CalledOnValidThread());
++  // phlink: hard-disable Network Time Service polling. PRD §3.5 (TELM-01).
++  // Without this, the browser polls clients2.google.com/time/1/current at
++  // startup and on schedule. We trust the OS clock; runtime callers get a
++  // synchronous failure (no time available, no upload).
++  if (true) {
++    std::move(closure).Run();
++    return false;
++  }
+   FetchBehavior behavior = GetFetchBehavior();
+   if (behavior != FETCHES_ON_DEMAND_ONLY &&
+       behavior != FETCHES_IN_BACKGROUND_AND_ON_DEMAND) {
+-- 
+2.50.1 (Apple Git-155)
+
