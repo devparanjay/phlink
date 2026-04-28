@@ -1,0 +1,130 @@
+From 8efa1e84fac7dd866558ca1c8d968bea73a55e2a Mon Sep 17 00:00:00 2001
+From: phlink <dev@phlink.invalid>
+Date: Wed, 29 Apr 2026 03:22:59 +0530
+Subject: [PATCH] =?UTF-8?q?phlink:=20phase=205-02a=20=E2=80=94=20adblock?=
+ =?UTF-8?q?=20smoke=20consumer=20+=20thiserror=20v1=20build-script=20fix?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+* //chrome/browser/phlink/adblock:phlink_adblock_check is a tiny
+  rust_executable that depends on //third_party/rust/adblock/v0_12:lib
+  and instantiates an empty adblock::Engine. It exists to (a) prove the
+  vendored adblock rlib + 30 transitive crates compile and link inside
+  the Chromium build, and (b) keep the rlib reachable in the GN graph
+  until plan 5-03 lands the real C++ wrapper.
+
+  Run: ./out/Default/phlink_adblock_check  →  'phlink_adblock_check: ok'
+
+* //BUILD.gn:rust_build_tests group now lists the smoke target so it is
+  built by default with the rest of //build/rust/tests.
+
+* gnrt_config.toml: split [crate.thiserror] into per-epoch sections.
+  The unversioned entry was wrong for thiserror 1.x (whose build.rs
+  emits only cfg flags, no private.rs file); only thiserror 2.x needs
+  build_script_outputs = ["private.rs"]. This unblocked the build.
+
+Refs PRD §5; phase 5 plan 5-01 verification + 5-02 scaffold.
+---
+ BUILD.gn                                        |  5 ++++-
+ chrome/browser/phlink/adblock/BUILD.gn          | 16 ++++++++++++++++
+ .../phlink/adblock/phlink_adblock_check.rs      | 17 +++++++++++++++++
+ .../rust/chromium_crates_io/gnrt_config.toml    |  6 +++++-
+ third_party/rust/thiserror/v1/BUILD.gn          |  1 -
+ 5 files changed, 42 insertions(+), 3 deletions(-)
+ create mode 100644 chrome/browser/phlink/adblock/BUILD.gn
+ create mode 100644 chrome/browser/phlink/adblock/phlink_adblock_check.rs
+
+diff --git a/BUILD.gn b/BUILD.gn
+index f92b35eda2687..2460a044c278f 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -853,7 +853,10 @@ group("all_rust") {
+ # This group exists to give targets for the waterfall to refer to.
+ group("rust_build_tests") {
+   testonly = true
+-  deps = [ "//build/rust/tests" ]
++  deps = [
++    "//build/rust/tests",
++    "//chrome/browser/phlink/adblock:phlink_adblock_check",
++  ]
+ }
+ 
+ # TODO(https://crbug.com/1112776): ensure remoting is functional on Linux builds with
+diff --git a/chrome/browser/phlink/adblock/BUILD.gn b/chrome/browser/phlink/adblock/BUILD.gn
+new file mode 100644
+index 0000000000000..03f9434b0284d
+--- /dev/null
++++ b/chrome/browser/phlink/adblock/BUILD.gn
+@@ -0,0 +1,16 @@
++# Copyright 2026 The phlink Authors
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++
++import("//build/rust/rust_executable.gni")
++
++# Build-time smoke test: forces compilation of the vendored adblock-rust
++# rlib + transitive deps. This target exists so the GN graph has at least
++# one consumer of //third_party/rust/adblock/v0_12:lib until plan 5-02
++# lands the real C++ wrapper. It is NOT linked into //chrome.
++rust_executable("phlink_adblock_check") {
++  testonly = true
++  crate_root = "phlink_adblock_check.rs"
++  sources = [ "phlink_adblock_check.rs" ]
++  deps = [ "//third_party/rust/adblock/v0_12:lib" ]
++}
+diff --git a/chrome/browser/phlink/adblock/phlink_adblock_check.rs b/chrome/browser/phlink/adblock/phlink_adblock_check.rs
+new file mode 100644
+index 0000000000000..94e4b0a370386
+--- /dev/null
++++ b/chrome/browser/phlink/adblock/phlink_adblock_check.rs
+@@ -0,0 +1,17 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++//
++// Smoke test: instantiates a minimal `adblock::Engine` to prove the
++// vendored crate links and its public API surface is visible. Replaced
++// by the real adblock service in phlink phase 5-02+.
++
++fn main() {
++    let rules: [&str; 0] = [];
++    let engine = adblock::Engine::from_rules(
++        rules,
++        adblock::lists::ParseOptions::default(),
++    );
++    let _ = std::hint::black_box(engine);
++    println!("phlink_adblock_check: ok");
++}
+diff --git a/third_party/rust/chromium_crates_io/gnrt_config.toml b/third_party/rust/chromium_crates_io/gnrt_config.toml
+index 2ad53a44eeb22..e8143c03f7745 100644
+--- a/third_party/rust/chromium_crates_io/gnrt_config.toml
++++ b/third_party/rust/chromium_crates_io/gnrt_config.toml
+@@ -848,7 +848,11 @@ allow_unsafe = false
+ [crate.termcolor.extra_kv]
+ allow_unsafe = false
+ 
+-[crate.thiserror]
++[crate."thiserror@v1"]
++# thiserror 1.x's build.rs only emits cfg flags, no generated files.
++extra_kv = { allow_unsafe = false }
++
++[crate."thiserror@v2"]
+ build_script_outputs = [ "private.rs" ]
+ extra_kv = { allow_unsafe = false }
+ 
+diff --git a/third_party/rust/thiserror/v1/BUILD.gn b/third_party/rust/thiserror/v1/BUILD.gn
+index 3e62a63d18e6b..91529fd426214 100644
+--- a/third_party/rust/thiserror/v1/BUILD.gn
++++ b/third_party/rust/thiserror/v1/BUILD.gn
+@@ -37,7 +37,6 @@ cargo_crate("lib") {
+       "//third_party/rust/chromium_crates_io/vendor/thiserror-v1/build.rs"
+   build_sources =
+       [ "//third_party/rust/chromium_crates_io/vendor/thiserror-v1/build.rs" ]
+-  build_script_outputs = [ "private.rs" ]
+ 
+   # Only for usage from third-party crates. Add the crate to
+   # //third_party/rust/chromium_crates_io/Cargo.toml to use
+-- 
+2.50.1 (Apple Git-155)
+
