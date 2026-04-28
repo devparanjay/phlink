@@ -1,0 +1,19 @@
+# phlink CODEOWNERS
+#
+# Each line is a file pattern followed by one or more owners. The last matching
+# pattern wins. Owners are auto-requested for review on PRs touching their files.
+# See: https://docs.github.com/en/repositories/managing-your-repositories-settings-and-security/customizing-your-repository/about-code-owners
+
+# Default owner for everything in the repo.
+*                              @devparanjay
+
+# Build & CI ownership stays with the maintainer until specialized owners exist.
+/scripts/                      @devparanjay
+/build/                        @devparanjay
+/.github/workflows/            @devparanjay
+
+# Patches need extra eyes — the patch set is the riskiest part of the project.
+/patches/                      @devparanjay
+
+# Documentation
+/docs/                         @devparanjay

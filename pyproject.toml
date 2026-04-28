@@ -1,0 +1,19 @@
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = [".refs", ".planning", "node_modules"]
+
+[tool.ruff.lint]
+# A pragmatic baseline. We deliberately skip docstring rules (D*) and
+# magic-number rules (PLR2004) to keep the noise floor low for short scripts.
+select = ["E", "F", "W", "B", "I", "UP", "N", "S", "C4", "SIM", "RET"]
+ignore = [
+    "S101",   # asserts are fine in scripts
+    "S603",   # subprocess: untrusted input — we control the inputs
+    "S607",   # subprocess: starting a process without absolute path is fine for git/gn
+    "E501",   # let formatter handle line length
+]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/refresh-patches.py" = ["S603"]
+"scripts/apply-patches.py" = ["S603"]

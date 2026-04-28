@@ -1,0 +1,3 @@
+# See https://github.com/koalaman/shellcheck/wiki for individual rule docs.
+# SC1090/SC1091: sourcing files whose path is dynamic — we don't try to follow.
+disable=SC1090,SC1091

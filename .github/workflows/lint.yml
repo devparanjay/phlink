@@ -1,0 +1,122 @@
+name: lint
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-linux:
+    name: lint (ubuntu-22.04)
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+
+      - name: Set up Python
+        uses: actions/setup-python@39cd14951b08e74b54015e9e001cdefcf80e669f # v5.1.1
+        with:
+          python-version: '3.11'
+
+      - name: Install Python tooling
+        run: pip install --upgrade pip ruff jsonschema
+
+      - name: Install Node tooling
+        uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b # v4.0.3
+        with:
+          node-version: '20'
+
+      - name: Install markdownlint-cli2
+        run: npm install --global markdownlint-cli2@0.13.0
+
+      - name: shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          shellcheck scripts/*.sh
+
+      - name: ruff
+        run: ruff check scripts
+
+      - name: py_compile
+        run: python -m compileall -q scripts
+
+      - name: markdownlint
+        run: markdownlint-cli2 "**/*.md" "#node_modules" "#.refs" "#.planning" "#.github/skills"
+
+      - name: validate MANIFEST schema (self-check)
+        run: |
+          python - <<'PY'
+          import json, jsonschema
+          schema = json.load(open('scripts/refs/MANIFEST.schema.json'))
+          jsonschema.Draft202012Validator.check_schema(schema)
+          print("MANIFEST.schema.json is a valid Draft 2020-12 schema")
+          PY
+
+  lint-macos:
+    name: lint (macos-14)
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+
+      - name: Set up Python
+        uses: actions/setup-python@39cd14951b08e74b54015e9e001cdefcf80e669f # v5.1.1
+        with:
+          python-version: '3.11'
+
+      - name: Install Python tooling
+        run: pip install --upgrade pip ruff
+
+      - name: Install shellcheck
+        run: brew install shellcheck
+
+      - name: shellcheck
+        run: shellcheck scripts/*.sh
+
+      - name: ruff
+        run: ruff check scripts
+
+      - name: py_compile
+        run: python -m compileall -q scripts
+
+  lint-windows:
+    name: lint (windows-2022)
+    runs-on: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+
+      - name: Set up Python
+        uses: actions/setup-python@39cd14951b08e74b54015e9e001cdefcf80e669f # v5.1.1
+        with:
+          python-version: '3.11'
+
+      - name: Install Python tooling
+        run: pip install --upgrade pip ruff
+
+      - name: Install PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Install-Module -Name PSScriptAnalyzer -Force -Scope CurrentUser
+          Import-Module PSScriptAnalyzer
+
+      - name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          $results = Invoke-ScriptAnalyzer -Path scripts -Recurse -Severity Warning,Error
+          $results | Format-Table -AutoSize
+          if ($results) { exit 1 }
+
+      - name: ruff
+        run: ruff check scripts
+
+      - name: py_compile
+        run: python -m compileall -q scripts
