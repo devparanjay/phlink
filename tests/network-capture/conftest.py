@@ -119,18 +119,24 @@ def _start_mitmproxy(capture: Capture, port: int, confdir: Path) -> threading.Th
     def _run() -> None:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        opts = mitm_options.Options(
-            listen_host="127.0.0.1",
-            listen_port=port,
-            confdir=str(confdir),
-            ssl_insecure=True,
-        )
-        master = DumpMaster(opts, with_termlog=False, with_dumper=False)
-        master.addons.add(_RecordAddon(capture))
-        state["master"] = master
-        ready.set()
+
+        async def _build_and_run() -> None:
+            # mitmproxy 11+ requires DumpMaster to be constructed from
+            # within a running event loop (asyncio.get_running_loop()).
+            opts = mitm_options.Options(
+                listen_host="127.0.0.1",
+                listen_port=port,
+                confdir=str(confdir),
+                ssl_insecure=True,
+            )
+            master = DumpMaster(opts, with_termlog=False, with_dumper=False)
+            master.addons.add(_RecordAddon(capture))
+            state["master"] = master
+            ready.set()
+            await master.run()
+
         try:
-            loop.run_until_complete(master.run())
+            loop.run_until_complete(_build_and_run())
         finally:
             loop.close()
 
