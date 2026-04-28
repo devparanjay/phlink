@@ -1,0 +1,62 @@
+From aef0a6e5ed51837677f646b2c2867cb6c2df764b Mon Sep 17 00:00:00 2001
+From: phlink <phlink@local>
+Date: Wed, 29 Apr 2026 02:44:09 +0530
+Subject: [PATCH] phlink: plug NTS timer path + AIM eligibility probe
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Phase 4.6 patches 0007/0009 short-circuited the StartTimeFetch() and
+OneGoogleBarLoaderImpl::Load() entry points, but harness re-run on
+the rebuilt binary still observed:
+  - clients2.google.com/time/1/current  (NTS via timer-driven
+    CheckTime() path, independent of StartTimeFetch())
+  - www.google.com/async/folae?udm=50   (NOT One Google Bar — this is
+    omnibox AimEligibilityService, "AI Mode" probe)
+
+This commit silences both at their primary issuance points:
+  - NetworkTimeTracker::CheckTime() returns immediately.
+  - AimEligibilityService::FetchEligibility() returns immediately.
+
+PRD section 3.5, TELM-01.
+---
+ components/network_time/network_time_tracker.cc       | 5 +++++
+ components/omnibox/browser/aim_eligibility_service.cc | 6 ++++++
+ 2 files changed, 11 insertions(+)
+
+diff --git a/components/network_time/network_time_tracker.cc b/components/network_time/network_time_tracker.cc
+index caf1e06ef3706..47ea355a5588d 100644
+--- a/components/network_time/network_time_tracker.cc
++++ b/components/network_time/network_time_tracker.cc
+@@ -464,6 +464,11 @@ bool NetworkTimeTracker::StartTimeFetch(base::OnceClosure closure) {
+ 
+ void NetworkTimeTracker::CheckTime() {
+   DCHECK(thread_checker_.CalledOnValidThread());
++  // phlink: hard-disable Network Time Service polling at the timer-driven
++  // entry point as well as at StartTimeFetch(). PRD §3.5 (TELM-01).
++  // CheckTime() is invoked both from StartTimeFetch() and from a repeating
++  // timer; we silence both paths.
++  return;
+ 
+   base::TimeDelta interval = kCheckTimeInterval.Get();
+   if (interval.is_negative()) {
+diff --git a/components/omnibox/browser/aim_eligibility_service.cc b/components/omnibox/browser/aim_eligibility_service.cc
+index c56b00d6798a3..94e7c1f995850 100644
+--- a/components/omnibox/browser/aim_eligibility_service.cc
++++ b/components/omnibox/browser/aim_eligibility_service.cc
+@@ -642,6 +642,12 @@ void AimEligibilityService::StartServerEligibilityRequestForDebugging() {
+ }
+ 
+ void AimEligibilityService::FetchEligibility(RequestSource source) {
++  // phlink: hard-disable AIM (AI Mode) eligibility probe. PRD §3.5
++  // (TELM-01). Without this, the omnibox AIM service POSTs to
++  // www.google.com/async/folae on startup, cookie change, primary-account
++  // change, network change, refresh-token update, etc. phlink does not
++  // ship Google AIM features.
++  return;
+   StartServerEligibilityRequest(source, GetLocale());
+ }
+ 
+-- 
+2.50.1 (Apple Git-155)
+

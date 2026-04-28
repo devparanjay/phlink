@@ -1,0 +1,35 @@
+From 434e8e633505367f048cd12ae2e1fcfcef081313 Mon Sep 17 00:00:00 2001
+From: phlink <phlink@local>
+Date: Wed, 29 Apr 2026 02:48:40 +0530
+Subject: [PATCH] phlink: also short-circuit AIM StartServerEligibilityRequest
+
+Belt-and-suspenders: FetchEligibility() return alone is not enough
+because debug paths and a debounce-timer callback bind directly to
+StartServerEligibilityRequest. Silence that issuance point too.
+PRD section 3.5, TELM-01.
+---
+ components/omnibox/browser/aim_eligibility_service.cc | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/components/omnibox/browser/aim_eligibility_service.cc b/components/omnibox/browser/aim_eligibility_service.cc
+index 94e7c1f995850..b4fcd4bc6dcfd 100644
+--- a/components/omnibox/browser/aim_eligibility_service.cc
++++ b/components/omnibox/browser/aim_eligibility_service.cc
+@@ -971,8 +971,13 @@ void AimEligibilityService::ScheduleServerEligibilityRequest(
+ void AimEligibilityService::StartServerEligibilityRequest(
+     RequestSource request_source,
+     const std::string& locale) {
+-  // Cancel pending requests.
++  // phlink: hard-disable AIM eligibility request issuance. PRD §3.5
++  // (TELM-01). Belt-and-suspenders companion to the FetchEligibility
++  // short-circuit — there are debug, debounce, and direct call paths
++  // that reach this issuance point. Cancel any in-flight loader and
++  // return without creating a new one.
+   active_loader_.reset();
++  return;
+ 
+   // URLLoaderFactory may be null in tests.
+   if (!url_loader_factory_ || !template_url_service_) {
+-- 
+2.50.1 (Apple Git-155)
+
