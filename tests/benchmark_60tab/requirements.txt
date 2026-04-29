@@ -1,0 +1,4 @@
+psutil>=5.9
+pytest>=8
+requests>=2.31
+websocket-client>=1.7
