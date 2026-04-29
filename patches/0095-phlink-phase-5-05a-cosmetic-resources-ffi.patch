@@ -1,0 +1,224 @@
+From 6ba63475f04c0d4702d2034a6dada6404ba89cf3 Mon Sep 17 00:00:00 2001
+From: phlink <phlink@local>
+Date: Wed, 29 Apr 2026 13:20:59 +0530
+Subject: [PATCH] =?UTF-8?q?phlink:=20phase=205-05a=20=E2=80=94=20expose=20?=
+ =?UTF-8?q?UrlCosmeticResources=20on=20adblock=20Engine?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Plumbs adblock-rust's url_cosmetic_resources() through the cxx
+bridge as engine_url_cosmetic_resources(), and surfaces it on the
+C++ Engine wrapper as Engine::UrlCosmeticResources(url) returning
+{hide_selectors, injected_script, generichide}. Hide-selector
+output is sorted so the renderer-side stylesheet (5-05c) is
+deterministic across runs.
+
+Two new unit tests:
+  * HostScopedHideSelector: example.invalid##.banner hits on
+    example.invalid and is absent on other.invalid.
+  * EmptyEngineYieldsNoSelectors.
+
+10/10 phlink_adblock_unittests SUCCESS. Build clean.
+
+Refs PRD §6.1 (cosmetic filtering), plan 5-05a.
+---
+ .../browser/phlink/adblock/phlink_adblock.cc  | 20 ++++++++
+ .../browser/phlink/adblock/phlink_adblock.h   | 25 ++++++++++
+ .../phlink/adblock/phlink_adblock_ffi.rs      | 47 +++++++++++++++++++
+ .../phlink/adblock/phlink_adblock_unittest.cc | 32 +++++++++++++
+ 4 files changed, 124 insertions(+)
+
+diff --git a/chrome/browser/phlink/adblock/phlink_adblock.cc b/chrome/browser/phlink/adblock/phlink_adblock.cc
+index b6f613d4e6399..c95ca8fcba2d4 100644
+--- a/chrome/browser/phlink/adblock/phlink_adblock.cc
++++ b/chrome/browser/phlink/adblock/phlink_adblock.cc
+@@ -23,6 +23,12 @@ Engine::Engine(::rust::Box<EngineHandle> handle) : handle_(std::move(handle)) {}
+ 
+ Engine::~Engine() = default;
+ 
++Engine::CosmeticResources::CosmeticResources() = default;
++Engine::CosmeticResources::CosmeticResources(CosmeticResources&&) = default;
++Engine::CosmeticResources& Engine::CosmeticResources::operator=(
++    CosmeticResources&&) = default;
++Engine::CosmeticResources::~CosmeticResources() = default;
++
+ // static
+ std::unique_ptr<Engine> Engine::CreateEmpty() {
+   return std::unique_ptr<Engine>(new Engine(engine_new_empty()));
+@@ -52,4 +58,18 @@ Engine::Decision Engine::ShouldBlock(std::string_view url,
+   return out;
+ }
+ 
++Engine::CosmeticResources Engine::UrlCosmeticResources(
++    std::string_view url) const {
++  ::phlink::adblock::CosmeticResources raw =
++      engine_url_cosmetic_resources(*handle_, ToRustStr(url));
++  CosmeticResources out;
++  out.hide_selectors.reserve(raw.hide_selectors.size());
++  for (const auto& s : raw.hide_selectors) {
++    out.hide_selectors.emplace_back(std::string(s));
++  }
++  out.injected_script = std::string(raw.injected_script);
++  out.generichide = raw.generichide;
++  return out;
++}
++
+ }  // namespace phlink::adblock
+diff --git a/chrome/browser/phlink/adblock/phlink_adblock.h b/chrome/browser/phlink/adblock/phlink_adblock.h
+index e2fbbfb7efe66..41c4874d38f15 100644
+--- a/chrome/browser/phlink/adblock/phlink_adblock.h
++++ b/chrome/browser/phlink/adblock/phlink_adblock.h
+@@ -8,6 +8,7 @@
+ #include <memory>
+ #include <string>
+ #include <string_view>
++#include <vector>
+ 
+ // Pulls in `::rust::Box` and the cxx-generated `phlink::adblock::EngineHandle`
+ // opaque type used as `Box`'s template parameter below.
+@@ -60,6 +61,30 @@ class Engine {
+                        std::string_view source_url,
+                        std::string_view request_type) const;
+ 
++  // Cosmetic-filter resources for a top-level document URL. Phlink's
++  // renderer applies these at document-start (see plan 5-05c).
++  struct CosmeticResources {
++    CosmeticResources();
++    CosmeticResources(const CosmeticResources&) = delete;
++    CosmeticResources& operator=(const CosmeticResources&) = delete;
++    CosmeticResources(CosmeticResources&&);
++    CosmeticResources& operator=(CosmeticResources&&);
++    ~CosmeticResources();
++
++    // Each entry is one CSS selector; the renderer concatenates them
++    // into a single `display: none !important;` stylesheet.
++    std::vector<std::string> hide_selectors;
++    // JS to inject at document-start (uBO-style `+js(...)` scriptlets).
++    std::string injected_script;
++    // True when `$generichide` exception applies — the renderer should
++    // skip generic (non-hostname-specific) hide rules.
++    bool generichide = false;
++  };
++
++  // Returns the cosmetic resources that should be applied to a document
++  // loading at `url`. Cheap on hot paths once the engine is warm.
++  CosmeticResources UrlCosmeticResources(std::string_view url) const;
++
+  private:
+   explicit Engine(::rust::Box<EngineHandle> handle);
+ 
+diff --git a/chrome/browser/phlink/adblock/phlink_adblock_ffi.rs b/chrome/browser/phlink/adblock/phlink_adblock_ffi.rs
+index b5443a5bb75e2..205d50ff26496 100644
+--- a/chrome/browser/phlink/adblock/phlink_adblock_ffi.rs
++++ b/chrome/browser/phlink/adblock/phlink_adblock_ffi.rs
+@@ -33,6 +33,25 @@ mod ffi {
+         pub exception: String,
+     }
+ 
++    /// Cosmetic-filter resources for a single page URL — the CSS hide
++    /// selectors and the optional injected JavaScript that should be
++    /// applied to the document at document-start.
++    ///
++    /// Procedural cosmetic actions and exception lists are intentionally
++    /// elided in v1; phlink ships only the static `##selector` family
++    /// and uBO-compatible `##+js(...)` scriptlets.
++    #[derive(Debug)]
++    pub struct CosmeticResources {
++        /// Each element is one CSS selector (e.g. `.ad-banner`). The
++        /// renderer concatenates them into a single stylesheet.
++        pub hide_selectors: Vec<String>,
++        /// JavaScript text to inject at document-start; empty if none.
++        pub injected_script: String,
++        /// True when the matching `$generichide` exception means the
++        /// renderer should skip generic (non-hostname-specific) hides.
++        pub generichide: bool,
++    }
++
+     extern "Rust" {
+         type EngineHandle;
+ 
+@@ -62,6 +81,18 @@ mod ffi {
+             source_url: &str,
+             request_type: &str,
+         ) -> BlockDecision;
++
++        /// Returns the URL-specific cosmetic resources (element-hide
++        /// selectors plus any `+js(...)` scriptlet text) that the renderer
++        /// should apply to a document loading at `url`.
++        ///
++        /// Phase 5-05a deliverable. The browser side fans these out per
++        /// frame via Mojo in 5-05b, and the renderer applies them via a
++        /// `RenderFrameObserver` in 5-05c.
++        fn engine_url_cosmetic_resources(
++            engine: &EngineHandle,
++            url: &str,
++        ) -> CosmeticResources;
+     }
+ }
+ 
+@@ -116,3 +147,19 @@ fn engine_should_block(
+         exception,
+     }
+ }
++
++fn engine_url_cosmetic_resources(
++    engine: &EngineHandle,
++    url: &str,
++) -> ffi::CosmeticResources {
++    let r = engine.0.url_cosmetic_resources(url);
++    let mut hides: Vec<String> = r.hide_selectors.into_iter().collect();
++    // Sorted output keeps the rendered stylesheet stable, which makes the
++    // test seam in 5-05c (`expect_stylesheet_contains`) order-independent.
++    hides.sort();
++    ffi::CosmeticResources {
++        hide_selectors: hides,
++        injected_script: r.injected_script,
++        generichide: r.generichide,
++    }
++}
+diff --git a/chrome/browser/phlink/adblock/phlink_adblock_unittest.cc b/chrome/browser/phlink/adblock/phlink_adblock_unittest.cc
+index 480f1cf5839c2..14d95701cb8aa 100644
+--- a/chrome/browser/phlink/adblock/phlink_adblock_unittest.cc
++++ b/chrome/browser/phlink/adblock/phlink_adblock_unittest.cc
+@@ -112,5 +112,37 @@ TEST(PhlinkAdblockBundledRulesTest, BlocksKnownAdHost) {
+       << "bundled lists should not block first-party scripts";
+ }
+ 
++TEST(PhlinkAdblockCosmeticTest, HostScopedHideSelector) {
++  // uBO/EasyList syntax: `example.invalid##.ad-banner` hides
++  // `.ad-banner` only on example.invalid, not elsewhere.
++  auto engine = Engine::CreateFromRules(
++      "example.invalid##.phlink-test-banner");
++  ASSERT_TRUE(engine);
++
++  auto on_host = engine->UrlCosmeticResources("https://example.invalid/page");
++  bool found = false;
++  for (const auto& sel : on_host.hide_selectors) {
++    if (sel == ".phlink-test-banner") {
++      found = true;
++      break;
++    }
++  }
++  EXPECT_TRUE(found) << "host-scoped cosmetic rule should hit on the host";
++
++  auto off_host =
++      engine->UrlCosmeticResources("https://other.invalid/page");
++  for (const auto& sel : off_host.hide_selectors) {
++    EXPECT_NE(sel, ".phlink-test-banner")
++        << "host-scoped cosmetic rule must not leak to other hosts";
++  }
++}
++
++TEST(PhlinkAdblockCosmeticTest, EmptyEngineYieldsNoSelectors) {
++  auto engine = Engine::CreateEmpty();
++  auto r = engine->UrlCosmeticResources("https://anything.invalid/");
++  EXPECT_TRUE(r.hide_selectors.empty());
++  EXPECT_TRUE(r.injected_script.empty());
++}
++
+ }  // namespace
+ }  // namespace phlink::adblock
+-- 
+2.50.1 (Apple Git-155)
+
