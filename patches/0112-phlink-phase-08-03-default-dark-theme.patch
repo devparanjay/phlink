@@ -1,0 +1,151 @@
+From a52dd015b85e976b995fbcaf8bd70f66ff3d33fe Mon Sep 17 00:00:00 2001
+From: phlink <phlink@local>
+Date: Wed, 29 Apr 2026 18:21:39 +0530
+Subject: [PATCH] phlink: phase 08-03 default Dark theme (D-08 locked palette,
+ kOnAccent=#000000)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Populates kPhlinkDark[kPhlinkPaletteSize] in
+chrome/browser/ui/color/phlink_palette.cc with the eleven LOCKED hex
+literals from CONTEXT D-08 / .planning/sketches/phase-08/stitch-output.md
+§2.2:
+
+  [0]  kCanvas      #0D0D0D
+  [1]  kSurface     #181818
+  [2]  kSurfaceAlt  #1F1F1F
+  [3]  kCard        #1F1F1F
+  [4]  kText        #FFFFFF
+  [5]  kTextMuted   #A0A0A0
+  [6]  kHairline    #2A2A2A
+  [7]  kAccent      #F5E68A   (Pastel Yellow)
+  [8]  kOnAccent    #000000   ← CRITICAL: never white. White-on-yellow
+                                is 1.3:1 (fails WCAG AA); black-on-yellow
+                                is 16:1 (passes).
+  [9]  kDanger      #F5736B   (lightened for dark bg)
+  [10] kSuccess     #6FE38A
+
+Adds two unit tests in phlink_color_mixer_unittests.cc:
+- PhlinkColorMixerDarkTest.LockedDarkHex — 11 EXPECT_EQ assertions for
+  per-token Dark hex equality. Mirrors the LockedHex pattern from 08-02.
+- PhlinkColorMixerDarkTest.OnAccent_DarkIsBlack_NeverWhite — dedicated
+  named gate for stitch-output.md §2.2 critical rule. Asserts both
+  EXPECT_EQ(SK_ColorBLACK) and EXPECT_NE(SK_ColorWHITE) so any future
+  drift is impossible to miss in the failure log.
+
+Verification:
+  out/Default/unit_tests --gtest_filter='*Phlink*' → 7/7 PASSED
+  autoninja -C out/Default chrome → Build Succeeded.
+---
+ .../ui/color/phlink_color_mixer_unittests.cc  | 56 +++++++++++++++++++
+ chrome/browser/ui/color/phlink_palette.cc     | 27 +++++----
+ 2 files changed, 71 insertions(+), 12 deletions(-)
+
+diff --git a/chrome/browser/ui/color/phlink_color_mixer_unittests.cc b/chrome/browser/ui/color/phlink_color_mixer_unittests.cc
+index 24469156328b4..6a6c4a826a7ed 100644
+--- a/chrome/browser/ui/color/phlink_color_mixer_unittests.cc
++++ b/chrome/browser/ui/color/phlink_color_mixer_unittests.cc
+@@ -89,4 +89,60 @@ TEST(PhlinkColorMixerLightTest, LockedHex) {
+             SkColorSetRGB(0x2E, 0x85, 0x40));
+ }
+ 
++// Phase 08-03: locked Dark theme palette per CONTEXT D-08 / stitch-output.md §2.2.
++// Each EXPECT_EQ asserts an exact hex literal; drift triggers gtest failure.
++TEST(PhlinkColorMixerDarkTest, LockedDarkHex) {
++  ui::ColorProvider provider;
++  ui::ColorProviderKey key;
++  key.color_mode = ui::ColorProviderKey::ColorMode::kDark;
++  AddPhlinkColorMixer(&provider, key);
++  provider.GenerateColorMapForTesting();
++
++  EXPECT_EQ(provider.GetColor(kColorPhlinkCanvas),
++            SkColorSetRGB(0x0D, 0x0D, 0x0D));
++  EXPECT_EQ(provider.GetColor(kColorPhlinkSurface),
++            SkColorSetRGB(0x18, 0x18, 0x18));
++  EXPECT_EQ(provider.GetColor(kColorPhlinkSurfaceAlt),
++            SkColorSetRGB(0x1F, 0x1F, 0x1F));
++  EXPECT_EQ(provider.GetColor(kColorPhlinkCard),
++            SkColorSetRGB(0x1F, 0x1F, 0x1F));
++  EXPECT_EQ(provider.GetColor(kColorPhlinkText),
++            SkColorSetRGB(0xFF, 0xFF, 0xFF));
++  EXPECT_EQ(provider.GetColor(kColorPhlinkTextMuted),
++            SkColorSetRGB(0xA0, 0xA0, 0xA0));
++  EXPECT_EQ(provider.GetColor(kColorPhlinkHairline),
++            SkColorSetRGB(0x2A, 0x2A, 0x2A));
++  EXPECT_EQ(provider.GetColor(kColorPhlinkAccent),
++            SkColorSetRGB(0xF5, 0xE6, 0x8A));
++  EXPECT_EQ(provider.GetColor(kColorPhlinkOnAccent),
++            SkColorSetRGB(0x00, 0x00, 0x00));
++  EXPECT_EQ(provider.GetColor(kColorPhlinkDanger),
++            SkColorSetRGB(0xF5, 0x73, 0x6B));
++  EXPECT_EQ(provider.GetColor(kColorPhlinkSuccess),
++            SkColorSetRGB(0x6F, 0xE3, 0x8A));
++}
++
++// Phase 08-03 critical invariant: stitch-output.md §2.2 mandates that the
++// foreground color on the Dark accent (#F5E68A pastel yellow) is BLACK, never
++// white. White-on-yellow yields 1.3:1 contrast (fails WCAG AA); black-on-yellow
++// yields 16:1 (passes). This dedicated test names the invariant so any future
++// drift is impossible to miss in the failure log.
++TEST(PhlinkColorMixerDarkTest, OnAccent_DarkIsBlack_NeverWhite) {
++  ui::ColorProvider provider;
++  ui::ColorProviderKey key;
++  key.color_mode = ui::ColorProviderKey::ColorMode::kDark;
++  AddPhlinkColorMixer(&provider, key);
++  provider.GenerateColorMapForTesting();
++
++  const SkColor on_accent = provider.GetColor(kColorPhlinkOnAccent);
++  EXPECT_EQ(on_accent, SkColorSetRGB(0x00, 0x00, 0x00))
++      << "kColorPhlinkOnAccent must be #000000 in Dark mode "
++         "(stitch-output.md §2.2 critical rule).";
++  EXPECT_EQ(on_accent, SK_ColorBLACK)
++      << "kColorPhlinkOnAccent must equal SK_ColorBLACK in Dark mode.";
++  EXPECT_NE(on_accent, SK_ColorWHITE)
++      << "kColorPhlinkOnAccent must NEVER be white on the pastel yellow accent "
++         "(white-on-#F5E68A is 1.3:1 and fails WCAG AA).";
++}
++
+ }  // namespace
+diff --git a/chrome/browser/ui/color/phlink_palette.cc b/chrome/browser/ui/color/phlink_palette.cc
+index 018274711b532..7cf7a9d128546 100644
+--- a/chrome/browser/ui/color/phlink_palette.cc
++++ b/chrome/browser/ui/color/phlink_palette.cc
+@@ -21,19 +21,22 @@ const SkColor kPhlinkLight[kPhlinkPaletteSize] = {
+     SkColorSetRGB(0x2E, 0x85, 0x40),  // [10] kSuccess     — #2E8540
+ };
+ 
+-// TODO(phlink): filled by patch 0112 (Dark) per CONTEXT D-08.
++// Locked by Phase 8 D-08; source: .planning/sketches/phase-08/stitch-output.md §2.2.
++// The kOnAccent black is the WCAG 16:1 invariant — DO NOT change to white without
++// re-running stitch validation and updating D-08. White on #F5E68A is 1.3:1 and
++// fails AA; black on #F5E68A is 16:1 and passes.
+ const SkColor kPhlinkDark[kPhlinkPaletteSize] = {
+-    SkColorSetRGB(0x00, 0x00, 0x00),  // kCanvas
+-    SkColorSetRGB(0x00, 0x00, 0x00),  // kSurface
+-    SkColorSetRGB(0x00, 0x00, 0x00),  // kSurfaceAlt
+-    SkColorSetRGB(0x00, 0x00, 0x00),  // kCard
+-    SkColorSetRGB(0x00, 0x00, 0x00),  // kText
+-    SkColorSetRGB(0x00, 0x00, 0x00),  // kTextMuted
+-    SkColorSetRGB(0x00, 0x00, 0x00),  // kHairline
+-    SkColorSetRGB(0x00, 0x00, 0x00),  // kAccent
+-    SkColorSetRGB(0x00, 0x00, 0x00),  // kOnAccent
+-    SkColorSetRGB(0x00, 0x00, 0x00),  // kDanger
+-    SkColorSetRGB(0x00, 0x00, 0x00),  // kSuccess
++    SkColorSetRGB(0x0D, 0x0D, 0x0D),  // [0] kCanvas       — #0D0D0D (near-black, slight warmth)
++    SkColorSetRGB(0x18, 0x18, 0x18),  // [1] kSurface      — #181818
++    SkColorSetRGB(0x1F, 0x1F, 0x1F),  // [2] kSurfaceAlt   — #1F1F1F
++    SkColorSetRGB(0x1F, 0x1F, 0x1F),  // [3] kCard         — #1F1F1F
++    SkColorSetRGB(0xFF, 0xFF, 0xFF),  // [4] kText         — #FFFFFF
++    SkColorSetRGB(0xA0, 0xA0, 0xA0),  // [5] kTextMuted    — #A0A0A0
++    SkColorSetRGB(0x2A, 0x2A, 0x2A),  // [6] kHairline     — #2A2A2A
++    SkColorSetRGB(0xF5, 0xE6, 0x8A),  // [7] kAccent       — #F5E68A (Pastel Yellow)
++    SkColorSetRGB(0x00, 0x00, 0x00),  // [8] kOnAccent     — #000000 ← CRITICAL: never white. 16:1 contrast.
++    SkColorSetRGB(0xF5, 0x73, 0x6B),  // [9] kDanger       — #F5736B (lightened for dark)
++    SkColorSetRGB(0x6F, 0xE3, 0x8A),  // [10] kSuccess     — #6FE38A
+ };
+ 
+ // Filled by patch 0114 (D-07 WCAG-AA gate).
+-- 
+2.50.1 (Apple Git-155)
+
