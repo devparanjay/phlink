@@ -66,6 +66,13 @@ jobs:
       - name: phlink WCAG-AA contrast audit (Phase 8 D-07)
         run: python scripts/contrast-audit.py --self-test
 
+      - name: phlink runtime branding audit (Phase 8.5 BRND-04)
+        # Skips cleanly when PHLINK_BINARY is unset; exercised in
+        # local UAT and in the chromium-build CI matrix.
+        run: |
+          pip install websocket-client
+          python tests/branding-audit/runtime-audit.py
+
   lint-macos:
     name: lint (macos-14)
     runs-on: macos-14

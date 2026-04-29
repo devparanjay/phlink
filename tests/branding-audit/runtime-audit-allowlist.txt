@@ -1,0 +1,28 @@
+# Phase 8.5 runtime audit allowlist
+# Substrings that may legitimately appear on internal phlink surfaces
+# even after rebranding. Substring match (re.escape'd). Lines starting
+# with # are comments.
+#
+# Each entry must be justified.
+
+# Legal: chromium copyright attribution (preserved, see Phase 8.5 D-rules).
+The Chromium Authors
+
+# Compat: User-Agent string is intentionally Chrome-shaped (web compat).
+# E.g.  "Chrome/149.0.0.0 Safari/537.36"
+Chrome/
+
+# Phase 8.6: chrome:// URL scheme alias is a separate phase. The
+# chrome://about page lists internal URLs; until 8.6 lands, the title
+# "Chrome URLs" and the listed URLs render verbatim.
+Chrome URLs
+chrome://
+
+# PRD §10.1: phlink reuses Chrome Web Store URLs.
+Chrome Web Store
+
+# Proper nouns of unrelated brands that may legitimately appear.
+Google
+Apple
+Microsoft
+Mozilla

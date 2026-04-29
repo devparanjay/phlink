@@ -34,6 +34,22 @@
 #                             hosts only.
 #   internal-symbol         — internal C++ symbol names / proto track-event
 #                             namespaces that surface only in `strings`.
+#
+# ─────────────────────────────────────────────────────────────────────
+# Phase 8.5 (BRND-04) reclassification:
+#
+# This file remains the authority for STATIC binary scanning (audit.sh
+# greps `strings` output of the bundle). Phase 4.7 over-trusted this
+# layer: several entries were assumed non-user-visible but UAT proved
+# they rendered in chrome. Phase 8.5 added a complementary RUNTIME
+# audit (tests/branding-audit/runtime-audit.py + CDP) that is the
+# authority for "what the user actually sees".
+#
+# Allowlist entries here cover binary-only surfaces. Anything that
+# might render in UI must additionally pass the runtime audit (see
+# tests/branding-audit/runtime-audit-allowlist.txt for the much
+# shorter rendered-UI exception list).
+# ─────────────────────────────────────────────────────────────────────
 
 # ── third-party-debug-path ───────────────────────────────────────────
 ../../third_party/federated_compute/chromium/
