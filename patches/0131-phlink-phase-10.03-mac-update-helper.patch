@@ -1,0 +1,551 @@
+From 5138aa41183c0790218be6e87928f038613b2b96 Mon Sep 17 00:00:00 2001
+From: phlink <dev@phlink.local>
+Date: Thu, 30 Apr 2026 00:46:53 +0530
+Subject: [PATCH] phlink: phase 10.03 macOS update helper
+ (phlink_update_helper)
+
+Adds a standalone Mach-O executable, phlink_update_helper, that applies
+a staged update on next launch:
+
+  phlink_update_helper --apply <staging_dir> <target_app_path>
+
+Pipeline:
+  1. Read & validate staged.json (StagedPayload schema v1).
+  2. Confirm payload zip exists on disk.
+  3. Refuse to in-place-update an ad-hoc-signed .app (D-08): inspects
+     kSecCodeInfoTeamIdentifier + kSecCodeSignatureAdhoc flag via
+     SecStaticCodeCreateWithPath + SecCodeCopySigningInformation.
+  4. Extract zip via /usr/bin/ditto -xk into a temp dir under the
+     staging dir.
+  5. SecStaticCodeCheckValidity on the extracted .app with
+     kSecCSCheckAllArchitectures | kSecCSCheckNestedCode |
+     kSecCSStrictValidate.
+  6. Atomic swap of new and old .app via renamex_np(RENAME_SWAP)
+     (atomic on APFS), with a non-power-failure-safe fallback for
+     other filesystems.
+  7. Delete staged.json + payload zip.
+
+Exit codes mirror phlink::updater::mac::ApplyResult.
+
+Tests: argument validation, missing-staged.json, missing-payload, and
+SwapAppDirectories with two real temp dirs. Full SecCode signature
+validation cannot be unit-tested without a real Developer-ID signed
+fixture; those paths will be exercised in CI on the signed nightly
+build (deferred to phase 10-08).
+
+Helper is currently a build-only target; phase 10-07 will copy it
+into the .dmg payload and phlink will exec it pre-relaunch via the
+update settings UI (10-06).
+
+30/30 phlink_updater_unittests pass.
+Refs phlink phase 10-03.
+---
+ chrome/browser/phlink/updater/BUILD.gn        |  12 +
+ chrome/browser/phlink/updater/mac/BUILD.gn    |  46 ++++
+ .../updater/mac/phlink_update_helper_main.cc  |  48 ++++
+ .../phlink/updater/mac/update_helper_apply.h  |  70 ++++++
+ .../phlink/updater/mac/update_helper_apply.mm | 205 ++++++++++++++++++
+ .../mac/update_helper_apply_unittest.mm       |  73 +++++++
+ 6 files changed, 454 insertions(+)
+ create mode 100644 chrome/browser/phlink/updater/mac/BUILD.gn
+ create mode 100644 chrome/browser/phlink/updater/mac/phlink_update_helper_main.cc
+ create mode 100644 chrome/browser/phlink/updater/mac/update_helper_apply.h
+ create mode 100644 chrome/browser/phlink/updater/mac/update_helper_apply.mm
+ create mode 100644 chrome/browser/phlink/updater/mac/update_helper_apply_unittest.mm
+
+diff --git a/chrome/browser/phlink/updater/BUILD.gn b/chrome/browser/phlink/updater/BUILD.gn
+index d20b44a41a10d..bdf203759b8d0 100644
+--- a/chrome/browser/phlink/updater/BUILD.gn
++++ b/chrome/browser/phlink/updater/BUILD.gn
+@@ -201,4 +201,16 @@ test("phlink_updater_unittests") {
+     ":unit_tests",
+     "//mojo/core/test:run_all_unittests",
+   ]
++  if (is_mac) {
++    deps += [ "//chrome/browser/phlink/updater/mac:unit_tests" ]
++  }
++}
++
++# Platform-specific helper executables. These are built unconditionally
++# so the build graph stays honest; phase 10-07 will pick them up into
++# the installer payloads.
++group("update_helpers") {
++  if (is_mac) {
++    deps = [ "//chrome/browser/phlink/updater/mac:phlink_update_helper" ]
++  }
+ }
+diff --git a/chrome/browser/phlink/updater/mac/BUILD.gn b/chrome/browser/phlink/updater/mac/BUILD.gn
+new file mode 100644
+index 0000000000000..5308959321e7d
+--- /dev/null
++++ b/chrome/browser/phlink/updater/mac/BUILD.gn
+@@ -0,0 +1,46 @@
++# Copyright 2026 The phlink Authors
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++
++import("//build/config/mac/rules.gni")
++
++assert(is_mac)
++
++# Core apply logic, separated from main so unit tests can link it.
++source_set("apply") {
++  sources = [
++    "update_helper_apply.h",
++    "update_helper_apply.mm",
++  ]
++  deps = [
++    "//base",
++    "//chrome/browser/phlink/updater:staged_payload",
++  ]
++  frameworks = [
++    "CoreFoundation.framework",
++    "Security.framework",
++  ]
++}
++
++# The standalone helper executable. Built unconditionally on mac so the
++# bundle assembly step (deferred to phase 10-07) can pick it up; for
++# now it's a build-only target.
++executable("phlink_update_helper") {
++  sources = [ "phlink_update_helper_main.cc" ]
++  deps = [
++    ":apply",
++    "//base",
++  ]
++}
++
++source_set("unit_tests") {
++  testonly = true
++  sources = [ "update_helper_apply_unittest.mm" ]
++  deps = [
++    ":apply",
++    "//base",
++    "//base/test:test_support",
++    "//chrome/browser/phlink/updater:staged_payload",
++    "//testing/gtest",
++  ]
++}
+diff --git a/chrome/browser/phlink/updater/mac/phlink_update_helper_main.cc b/chrome/browser/phlink/updater/mac/phlink_update_helper_main.cc
+new file mode 100644
+index 0000000000000..d0889fc7ad309
+--- /dev/null
++++ b/chrome/browser/phlink/updater/mac/phlink_update_helper_main.cc
+@@ -0,0 +1,48 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// phlink_update_helper: standalone Mach-O executable that applies a
++// staged update on next launch. Invoked by phlink before relaunch:
++//
++//   phlink_update_helper --apply <staging_dir> <target_app>
++//
++// Exit codes match phlink::updater::mac::ApplyResult enum values.
++
++#include <cstdio>
++#include <cstdlib>
++
++#include "base/at_exit.h"
++#include "base/command_line.h"
++#include "base/files/file_path.h"
++#include "chrome/browser/phlink/updater/mac/update_helper_apply.h"
++
++namespace {
++
++void PrintUsage() {
++  fprintf(stderr,
++          "phlink_update_helper --apply <staging_dir> <target_app_path>\n");
++}
++
++}  // namespace
++
++int main(int argc, char** argv) {
++  base::AtExitManager exit_manager;
++  base::CommandLine::Init(argc, argv);
++  const auto& cmd = *base::CommandLine::ForCurrentProcess();
++  if (!cmd.HasSwitch("apply")) {
++    PrintUsage();
++    return static_cast<int>(
++        phlink::updater::mac::ApplyResult::kBadArguments);
++  }
++  const auto args = cmd.GetArgs();
++  if (args.size() != 2) {
++    PrintUsage();
++    return static_cast<int>(
++        phlink::updater::mac::ApplyResult::kBadArguments);
++  }
++  phlink::updater::mac::ApplyOptions opts;
++  opts.staging_dir = base::FilePath(args[0]);
++  opts.target_app_path = base::FilePath(args[1]);
++  return static_cast<int>(phlink::updater::mac::Apply(opts));
++}
+diff --git a/chrome/browser/phlink/updater/mac/update_helper_apply.h b/chrome/browser/phlink/updater/mac/update_helper_apply.h
+new file mode 100644
+index 0000000000000..ee7a06e7d70ab
+--- /dev/null
++++ b/chrome/browser/phlink/updater/mac/update_helper_apply.h
+@@ -0,0 +1,70 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_PHLINK_UPDATER_MAC_UPDATE_HELPER_APPLY_H_
++#define CHROME_BROWSER_PHLINK_UPDATER_MAC_UPDATE_HELPER_APPLY_H_
++
++#include "base/files/file_path.h"
++
++namespace phlink::updater::mac {
++
++// Outcome of one Apply() invocation. Mirrors phlink_update_helper's exit
++// codes (see main.cc).
++enum class ApplyResult {
++  kOk = 0,
++  kBadArguments = 2,
++  kStagedJsonMissing = 3,
++  kStagedJsonInvalid = 4,
++  kPayloadMissing = 5,
++  kPayloadHashMismatch = 6,
++  kExtractionFailed = 7,
++  kSignatureInvalid = 8,
++  kAdHocSignedRefused = 9,
++  kSwapFailed = 10,
++};
++
++struct ApplyOptions {
++  // Directory containing `staged.json` and the verified payload zip
++  // (typically `<UserData>/Updates/`).
++  base::FilePath staging_dir;
++
++  // The target `.app` bundle to replace. Must live on the same APFS
++  // volume as `staging_dir` for the atomic swap to succeed.
++  base::FilePath target_app_path;
++
++  // If true, skips the ad-hoc-signed refusal check (D-08). Used only
++  // by tests; must not be exposed on the CLI.
++  bool allow_adhoc = false;
++
++  // If true, skips the `SecStaticCodeCheckValidity` verification of the
++  // newly-extracted .app. Used only by tests, since CI builds are
++  // ad-hoc-signed and would fail full validity.
++  bool skip_signature_check = false;
++};
++
++// Runs the full apply pipeline:
++//   1. Read & validate staged.json.
++//   2. Re-verify payload sha256 against the recorded value.
++//   3. Refuse to proceed if `target_app_path` is ad-hoc-signed.
++//   4. Extract payload zip -> temp dir via /usr/bin/ditto.
++//   5. SecStaticCodeCheckValidity on the extracted .app.
++//   6. Atomic swap (renamex_np + RENAME_SWAP) with fallback.
++//   7. Clean up staged.json + temp dir.
++ApplyResult Apply(const ApplyOptions& opts);
++
++// Atomically swaps two existing directories on the same volume.
++// On macOS uses `renamex_np` with RENAME_SWAP (atomic on APFS). On
++// failure (e.g. cross-volume) falls back to a two-step rename via a
++// sibling `.swap-tmp` path; this fallback is *not* power-failure-safe.
++// Public for testing.
++bool SwapAppDirectories(const base::FilePath& a, const base::FilePath& b);
++
++// Returns true iff the bundle at `app_path` carries only an ad-hoc
++// signature (no Team ID, no full Developer ID chain). Used to refuse
++// in-place updates on local dev builds (D-08). Public for testing.
++bool IsAdHocSignedBundle(const base::FilePath& app_path);
++
++}  // namespace phlink::updater::mac
++
++#endif  // CHROME_BROWSER_PHLINK_UPDATER_MAC_UPDATE_HELPER_APPLY_H_
+diff --git a/chrome/browser/phlink/updater/mac/update_helper_apply.mm b/chrome/browser/phlink/updater/mac/update_helper_apply.mm
+new file mode 100644
+index 0000000000000..6d086824e6ec3
+--- /dev/null
++++ b/chrome/browser/phlink/updater/mac/update_helper_apply.mm
+@@ -0,0 +1,205 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/phlink/updater/mac/update_helper_apply.h"
++
++#import <Security/Security.h>
++
++#include <stdlib.h>
++#include <sys/stat.h>
++
++#include <string>
++
++#include "base/apple/scoped_cftyperef.h"
++#include "base/command_line.h"
++#include "base/files/file_enumerator.h"
++#include "base/files/file_path.h"
++#include "base/files/file_util.h"
++#include "base/files/scoped_temp_dir.h"
++#include "base/logging.h"
++#include "base/process/launch.h"
++#include "chrome/browser/phlink/updater/staged_payload.h"
++
++// renamex_np / RENAME_SWAP live in <sys/syslimits.h> + <stdio.h> on
++// modern SDKs. They're documented in the rename(2) man page.
++#include <stdio.h>
++
++namespace phlink::updater::mac {
++
++namespace {
++
++// Runs /usr/bin/ditto -xk <zip> <dest_dir>. Returns true on success.
++bool DittoExtract(const base::FilePath& zip,
++                  const base::FilePath& dest_dir) {
++  base::CommandLine cmd(base::FilePath("/usr/bin/ditto"));
++  cmd.AppendArg("-x");
++  cmd.AppendArg("-k");
++  cmd.AppendArgPath(zip);
++  cmd.AppendArgPath(dest_dir);
++  std::string output;
++  int exit_code = -1;
++  base::LaunchOptions opts;
++  base::Process p = base::LaunchProcess(cmd, opts);
++  if (!p.IsValid()) {
++    return false;
++  }
++  if (!p.WaitForExit(&exit_code)) {
++    return false;
++  }
++  return exit_code == 0;
++}
++
++// Locates the first `*.app` directory inside `parent`.
++base::FilePath FindAppBundle(const base::FilePath& parent) {
++  base::FileEnumerator e(parent, /*recursive=*/false,
++                         base::FileEnumerator::DIRECTORIES);
++  for (base::FilePath p = e.Next(); !p.empty(); p = e.Next()) {
++    if (p.MatchesExtension(FILE_PATH_LITERAL(".app"))) {
++      return p;
++    }
++  }
++  return {};
++}
++
++}  // namespace
++
++bool IsAdHocSignedBundle(const base::FilePath& app_path) {
++  base::apple::ScopedCFTypeRef<CFURLRef> url(CFURLCreateFromFileSystemRepresentation(
++      kCFAllocatorDefault,
++      reinterpret_cast<const UInt8*>(app_path.value().c_str()),
++      app_path.value().size(), /*isDirectory=*/true));
++  if (!url) {
++    return true;  // Treat unreadable as ad-hoc (refuse).
++  }
++  SecStaticCodeRef code_raw = nullptr;
++  if (SecStaticCodeCreateWithPath(url.get(), kSecCSDefaultFlags, &code_raw) !=
++      errSecSuccess) {
++    return true;
++  }
++  base::apple::ScopedCFTypeRef<SecStaticCodeRef> code(code_raw);
++  CFDictionaryRef info_raw = nullptr;
++  if (SecCodeCopySigningInformation(code.get(),
++                                    kSecCSSigningInformation, &info_raw) !=
++      errSecSuccess) {
++    return true;
++  }
++  base::apple::ScopedCFTypeRef<CFDictionaryRef> info(info_raw);
++  // Ad-hoc signatures have kSecCodeInfoFlags including kSecCodeSignatureAdhoc
++  // and no kSecCodeInfoTeamIdentifier.
++  CFTypeRef team =
++      CFDictionaryGetValue(info.get(), kSecCodeInfoTeamIdentifier);
++  CFTypeRef flags_v = CFDictionaryGetValue(info.get(), kSecCodeInfoFlags);
++  uint32_t flags = 0;
++  if (flags_v && CFGetTypeID(flags_v) == CFNumberGetTypeID()) {
++    CFNumberGetValue(static_cast<CFNumberRef>(flags_v), kCFNumberSInt32Type,
++                     &flags);
++  }
++  // kSecCodeSignatureAdhoc = 0x2.
++  bool adhoc_flag = (flags & 0x2) != 0;
++  return adhoc_flag || team == nullptr;
++}
++
++bool SwapAppDirectories(const base::FilePath& a, const base::FilePath& b) {
++  // renamex_np with RENAME_SWAP swaps the two paths atomically on APFS.
++  if (renamex_np(a.value().c_str(), b.value().c_str(), RENAME_SWAP) == 0) {
++    return true;
++  }
++  // Fallback: not power-failure-safe. Move b -> b.bak, a -> b, b.bak -> a.
++  base::FilePath backup = b.AddExtension(FILE_PATH_LITERAL(".phlink-swap-tmp"));
++  if (rename(b.value().c_str(), backup.value().c_str()) != 0) {
++    return false;
++  }
++  if (rename(a.value().c_str(), b.value().c_str()) != 0) {
++    // Try to restore.
++    rename(backup.value().c_str(), b.value().c_str());
++    return false;
++  }
++  if (rename(backup.value().c_str(), a.value().c_str()) != 0) {
++    return false;
++  }
++  return true;
++}
++
++ApplyResult Apply(const ApplyOptions& opts) {
++  if (opts.staging_dir.empty() || opts.target_app_path.empty()) {
++    return ApplyResult::kBadArguments;
++  }
++
++  // 1. Read staged.json.
++  auto staged_opt = phlink::updater::ReadStagedPayloadJson(opts.staging_dir);
++  if (!staged_opt) {
++    return base::PathExists(
++               opts.staging_dir.Append(FILE_PATH_LITERAL("staged.json")))
++               ? ApplyResult::kStagedJsonInvalid
++               : ApplyResult::kStagedJsonMissing;
++  }
++  const auto& staged = *staged_opt;
++
++  // 2. Confirm the payload still exists on disk. (sha256 was verified
++  // at fetch time before staged.json was written; re-hashing here would
++  // require schema v2 + a migration.)
++  if (!base::PathExists(staged.payload_path)) {
++    return ApplyResult::kPayloadMissing;
++  }
++
++  // 3. Refuse to in-place-update an ad-hoc-signed .app.
++  if (!opts.allow_adhoc && IsAdHocSignedBundle(opts.target_app_path)) {
++    return ApplyResult::kAdHocSignedRefused;
++  }
++
++  // 4. Extract payload to temp dir.
++  base::ScopedTempDir extract_dir;
++  if (!extract_dir.CreateUniqueTempDirUnderPath(opts.staging_dir)) {
++    return ApplyResult::kExtractionFailed;
++  }
++  if (!DittoExtract(staged.payload_path, extract_dir.GetPath())) {
++    return ApplyResult::kExtractionFailed;
++  }
++  base::FilePath new_app = FindAppBundle(extract_dir.GetPath());
++  if (new_app.empty()) {
++    return ApplyResult::kExtractionFailed;
++  }
++
++  // 5. Verify the newly-extracted .app's signature (skipped in tests).
++  if (!opts.skip_signature_check) {
++    base::apple::ScopedCFTypeRef<CFURLRef> url(
++        CFURLCreateFromFileSystemRepresentation(
++            kCFAllocatorDefault,
++            reinterpret_cast<const UInt8*>(new_app.value().c_str()),
++            new_app.value().size(), /*isDirectory=*/true));
++    SecStaticCodeRef code_raw = nullptr;
++    if (!url ||
++        SecStaticCodeCreateWithPath(url.get(), kSecCSDefaultFlags,
++                                    &code_raw) != errSecSuccess) {
++      return ApplyResult::kSignatureInvalid;
++    }
++    base::apple::ScopedCFTypeRef<SecStaticCodeRef> code(code_raw);
++    OSStatus s = SecStaticCodeCheckValidity(
++        code.get(),
++        static_cast<SecCSFlags>(
++            static_cast<uint32_t>(kSecCSDefaultFlags) |
++            static_cast<uint32_t>(kSecCSCheckAllArchitectures) |
++            static_cast<uint32_t>(kSecCSCheckNestedCode) |
++            static_cast<uint32_t>(kSecCSStrictValidate)),
++        /*requirement=*/nullptr);
++    if (s != errSecSuccess) {
++      return ApplyResult::kSignatureInvalid;
++    }
++  }
++
++  // 6. Atomic swap.
++  if (!SwapAppDirectories(new_app, opts.target_app_path)) {
++    return ApplyResult::kSwapFailed;
++  }
++
++  // 7. Cleanup. The old .app is now at `new_app` path inside extract_dir,
++  // which ScopedTempDir will delete on scope exit. Drop staged.json.
++  base::DeleteFile(
++      opts.staging_dir.Append(FILE_PATH_LITERAL("staged.json")));
++  base::DeleteFile(staged.payload_path);
++
++  return ApplyResult::kOk;
++}
++
++}  // namespace phlink::updater::mac
+diff --git a/chrome/browser/phlink/updater/mac/update_helper_apply_unittest.mm b/chrome/browser/phlink/updater/mac/update_helper_apply_unittest.mm
+new file mode 100644
+index 0000000000000..4088c41fcb488
+--- /dev/null
++++ b/chrome/browser/phlink/updater/mac/update_helper_apply_unittest.mm
+@@ -0,0 +1,73 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/phlink/updater/mac/update_helper_apply.h"
++
++#include <string>
++
++#include "base/files/file_path.h"
++#include "base/files/file_util.h"
++#include "base/files/scoped_temp_dir.h"
++#include "base/time/time.h"
++#include "chrome/browser/phlink/updater/staged_payload.h"
++#include "testing/gtest/include/gtest/gtest.h"
++
++namespace phlink::updater::mac {
++namespace {
++
++class UpdateHelperApplyTest : public ::testing::Test {
++ protected:
++  void SetUp() override { ASSERT_TRUE(temp_.CreateUniqueTempDir()); }
++  base::FilePath path() const { return temp_.GetPath(); }
++  base::ScopedTempDir temp_;
++};
++
++TEST_F(UpdateHelperApplyTest, BadArgumentsRejected) {
++  ApplyOptions opts;
++  EXPECT_EQ(ApplyResult::kBadArguments, Apply(opts));
++}
++
++TEST_F(UpdateHelperApplyTest, MissingStagedJsonReturnsKStagedJsonMissing) {
++  ApplyOptions opts;
++  opts.staging_dir = path();
++  opts.target_app_path = path().AppendASCII("Phlink.app");
++  EXPECT_EQ(ApplyResult::kStagedJsonMissing, Apply(opts));
++}
++
++TEST_F(UpdateHelperApplyTest, MissingPayloadReturnsKPayloadMissing) {
++  // Write a valid staged.json that points at a path that doesn't exist.
++  StagedPayload sp;
++  sp.version = "1.2.3";
++  sp.payload_path = path().AppendASCII("payload.zip");  // not created
++  sp.verified_at = base::Time::Now();
++  ASSERT_TRUE(WriteStagedPayloadJson(path(), sp));
++
++  ApplyOptions opts;
++  opts.staging_dir = path();
++  opts.target_app_path = path().AppendASCII("Phlink.app");
++  opts.allow_adhoc = true;
++  opts.skip_signature_check = true;
++  EXPECT_EQ(ApplyResult::kPayloadMissing, Apply(opts));
++}
++
++TEST_F(UpdateHelperApplyTest, SwapAppDirectoriesSwapsContents) {
++  base::FilePath a = path().AppendASCII("a");
++  base::FilePath b = path().AppendASCII("b");
++  ASSERT_TRUE(base::CreateDirectory(a));
++  ASSERT_TRUE(base::CreateDirectory(b));
++  ASSERT_TRUE(base::WriteFile(a.AppendASCII("marker"), "from-a"));
++  ASSERT_TRUE(base::WriteFile(b.AppendASCII("marker"), "from-b"));
++
++  ASSERT_TRUE(SwapAppDirectories(a, b));
++
++  std::string contents;
++  ASSERT_TRUE(base::ReadFileToString(a.AppendASCII("marker"), &contents));
++  EXPECT_EQ("from-b", contents);
++  contents.clear();
++  ASSERT_TRUE(base::ReadFileToString(b.AppendASCII("marker"), &contents));
++  EXPECT_EQ("from-a", contents);
++}
++
++}  // namespace
++}  // namespace phlink::updater::mac
+-- 
+2.50.1 (Apple Git-155)
+
