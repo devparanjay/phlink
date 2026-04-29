@@ -1,0 +1,55 @@
+From a8831dc0081e8513306d295b3a549629c427b825 Mon Sep 17 00:00:00 2001
+From: phlink <phlink@local>
+Date: Wed, 29 Apr 2026 14:06:37 +0530
+Subject: [PATCH] =?UTF-8?q?phlink:=20phase=205-07=20=E2=80=94=20pin=20comp?=
+ =?UTF-8?q?onent-updater=20to=20updates.phlink.invalid?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Per PRD §10.1 / D-05, phlink does not contact Google's component-updater
+servers and has no opt-in telemetry. Until phase 11 stands up the real
+TUF-style update service, point both kUpdaterJSONDefaultUrl and
+kUpdaterJSONFallbackUrl at a non-resolving sentinel host
+(`https://updates.phlink.invalid/`) so that any component-updater
+traffic fails closed.
+
+Effects:
+- chrome://components still enumerates components (the registry is
+  populated locally), but every check-for-update request DNS-fails and
+  is silently ignored.
+- No update.googleapis.com contact at any layer.
+- No new UMA / no error toast surfaces (handled by existing silent-
+  failure paths in the updater).
+
+Refs PRD §10.1 (D-05), plan 5-07.
+---
+ .../component_updater_url_constants.cc                 | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/components/component_updater/component_updater_url_constants.cc b/components/component_updater/component_updater_url_constants.cc
+index 95c0d48942654..f8ceea05a38fe 100644
+--- a/components/component_updater/component_updater_url_constants.cc
++++ b/components/component_updater/component_updater_url_constants.cc
+@@ -14,10 +14,16 @@ namespace component_updater {
+ //
+ // The value of |kDefaultUrlSource| can be overridden with
+ // --component-updater=url-source=someurl.
++// phlink (PRD §10.1, D-05): the component updater is pinned to a phlink
++// endpoint we control. Until phase 11 stands up the real TUF-style updater
++// service, both URLs point at a non-resolving sentinel host so that any
++// component-updater traffic fails closed (no Google contact, no UMA, no
++// "phone home"). The default Chromium endpoints are intentionally not
++// shipped.
+ const char kUpdaterJSONDefaultUrl[] =
+-    "https://update.googleapis.com/service/update2/json";
++    "https://updates.phlink.invalid/service/update2/json";
+ 
+ const char kUpdaterJSONFallbackUrl[] =
+-    "http://update.googleapis.com/service/update2/json";
++    "https://updates.phlink.invalid/service/update2/json";
+ 
+ }  // namespace component_updater
+-- 
+2.50.1 (Apple Git-155)
+
