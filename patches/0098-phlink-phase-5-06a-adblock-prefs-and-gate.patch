@@ -1,0 +1,728 @@
+From 00fbc5b290822377cf4c6e44a713cbab314c5d19 Mon Sep 17 00:00:00 2001
+From: phlink <phlink@local>
+Date: Wed, 29 Apr 2026 14:03:07 +0530
+Subject: [PATCH] =?UTF-8?q?phlink:=20phase=205-06a=20=E2=80=94=20adblock?=
+ =?UTF-8?q?=20prefs=20+=20global=20runtime=20gate?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Adds the user-facing master switch and per-site exception list for the
+phlink adblocker, mirrored into a process-global runtime gate consumed
+by both the URLLoaderThrottle and the cosmetic-filter Mojo host.
+
+Changes
+-------
+* New profile prefs (default-on, syncable):
+  - phlink.adblock.enabled        (bool,   default true)
+  - phlink.adblock.exceptions     (list,   default [])
+
+* New EngineProvider runtime gate:
+  - SetEnabled / IsEnabled        (atomic bool, lock-free read)
+  - SetExceptionDomains            (lock-protected unordered_set)
+  - IsActiveForUrl(GURL)          — returns false when disabled, when
+    the URL is non-http(s), or when the URL's registrable domain
+    (eTLD+1) is in the exception set. Raw-IP / localhost (no
+    registrable domain) is treated as active.
+
+* New per-profile KeyedService AdblockSettingsService:
+  - Observes both prefs via PrefChangeRegistrar and pushes them to
+    EngineProvider on every change. Created with the browser context.
+  - ProfileSelection::kOwnInstance for regular; kNone for guest.
+    Incognito inherits its parent's prefs.
+
+* PhlinkAdblockThrottle:
+  - WillStartRequest gates on IsActiveForUrl(source_url) so the user's
+    "disable on this site" exception correctly suppresses subresource
+    blocking for that page.
+  - WillRedirectRequest gates on IsEnabled (master switch only) since
+    RedirectInfo doesn't always carry a usable source URL; the next
+    internally-restarted load passes through WillStartRequest.
+
+* CosmeticFilterHost::GetCosmeticResources gates on IsActiveForUrl;
+  inactive frames receive empty hide_selectors / injected_script.
+
+* Wiring:
+  - chrome/browser/prefs/browser_prefs.cc registers the new prefs.
+  - chrome/browser/profiles/chrome_browser_main_extra_parts_profiles.cc
+    constructs AdblockSettingsServiceFactory at startup.
+  - chrome/browser/prefs:impl and
+    chrome/browser/profiles:profiles_extra_parts_impl pick up the new
+    deps on //chrome/browser/phlink/adblock:phlink_adblock.
+
+* Unit tests (10 → 13 passing):
+  - PhlinkAdblockEngineProviderGateTest.MasterSwitchOff
+  - PhlinkAdblockEngineProviderGateTest.NonHttpSchemeInactive
+  - PhlinkAdblockEngineProviderGateTest.ExceptionDomainSuppressesActivity
+
+Refs phlink PRD §6.1 (adblock UX), plan 5-06.
+
+The chrome://settings/phlink/adblock UI lands in 5-06b once Phase 8
+brings the settings UI infra. Until then the prefs are settable via
+the Preferences JSON.
+---
+ chrome/browser/phlink/adblock/BUILD.gn        | 16 +++++-
+ .../adblock/adblock_settings_service.cc       | 53 +++++++++++++++++++
+ .../phlink/adblock/adblock_settings_service.h | 42 +++++++++++++++
+ .../adblock_settings_service_factory.cc       | 52 ++++++++++++++++++
+ .../adblock_settings_service_factory.h        | 40 ++++++++++++++
+ .../phlink/adblock/cosmetic_filter_host.cc    | 12 ++++-
+ .../browser/phlink/adblock/engine_provider.cc | 36 +++++++++++++
+ .../browser/phlink/adblock/engine_provider.h  | 53 +++++++++++++++----
+ .../phlink/adblock/phlink_adblock_prefs.cc    | 16 ++++++
+ .../phlink/adblock/phlink_adblock_prefs.h     | 28 ++++++++++
+ .../phlink/adblock/phlink_adblock_throttle.cc | 19 ++++++-
+ .../phlink/adblock/phlink_adblock_unittest.cc | 29 ++++++++++
+ chrome/browser/prefs/BUILD.gn                 |  1 +
+ chrome/browser/prefs/browser_prefs.cc         |  4 ++
+ chrome/browser/profiles/BUILD.gn              |  1 +
+ ...hrome_browser_main_extra_parts_profiles.cc |  4 ++
+ 16 files changed, 391 insertions(+), 15 deletions(-)
+ create mode 100644 chrome/browser/phlink/adblock/adblock_settings_service.cc
+ create mode 100644 chrome/browser/phlink/adblock/adblock_settings_service.h
+ create mode 100644 chrome/browser/phlink/adblock/adblock_settings_service_factory.cc
+ create mode 100644 chrome/browser/phlink/adblock/adblock_settings_service_factory.h
+ create mode 100644 chrome/browser/phlink/adblock/phlink_adblock_prefs.cc
+ create mode 100644 chrome/browser/phlink/adblock/phlink_adblock_prefs.h
+
+diff --git a/chrome/browser/phlink/adblock/BUILD.gn b/chrome/browser/phlink/adblock/BUILD.gn
+index 2ced0d04635dd..f2562a5dcfc0f 100644
+--- a/chrome/browser/phlink/adblock/BUILD.gn
++++ b/chrome/browser/phlink/adblock/BUILD.gn
+@@ -17,24 +17,37 @@ rust_static_library("phlink_adblock_ffi") {
+ 
+ # C++ surface. Plan 5-03 wires this into //chrome/browser via the
+ # `PhlinkAdblockThrottle` URLLoaderThrottle. Plan 5-05b wires
+-# `CosmeticFilterHost` into the per-frame Mojo binder map.
++# `CosmeticFilterHost` into the per-frame Mojo binder map. Plan 5-06a
++# adds the per-profile `AdblockSettingsService` + `EngineProvider`
++# runtime gate (master switch + per-site exceptions).
+ source_set("phlink_adblock") {
+   sources = [
++    "adblock_settings_service.cc",
++    "adblock_settings_service.h",
++    "adblock_settings_service_factory.cc",
++    "adblock_settings_service_factory.h",
+     "cosmetic_filter_host.cc",
+     "cosmetic_filter_host.h",
+     "engine_provider.cc",
+     "engine_provider.h",
+     "phlink_adblock.cc",
+     "phlink_adblock.h",
++    "phlink_adblock_prefs.cc",
++    "phlink_adblock_prefs.h",
+     "phlink_adblock_throttle.cc",
+     "phlink_adblock_throttle.h",
+   ]
+   public_deps = [
+     ":phlink_adblock_ffi",
+     "//chrome/common:phlink_adblock_mojom",
++    "//components/keyed_service/core",
+   ]
+   deps = [
+     "//base",
++    "//chrome/browser/profiles:profile",
++    "//components/keyed_service/content",
++    "//components/pref_registry",
++    "//components/prefs",
+     "//content/public/browser",
+     "//mojo/public/cpp/bindings",
+     "//net",
+@@ -52,6 +65,7 @@ source_set("unit_tests") {
+   deps = [
+     ":phlink_adblock",
+     "//testing/gtest",
++    "//url",
+   ]
+ }
+ 
+diff --git a/chrome/browser/phlink/adblock/adblock_settings_service.cc b/chrome/browser/phlink/adblock/adblock_settings_service.cc
+new file mode 100644
+index 0000000000000..3ddca2f232eb7
+--- /dev/null
++++ b/chrome/browser/phlink/adblock/adblock_settings_service.cc
+@@ -0,0 +1,53 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/phlink/adblock/adblock_settings_service.h"
++
++#include <string>
++#include <unordered_set>
++#include <utility>
++
++#include "base/functional/bind.h"
++#include "base/strings/string_util.h"
++#include "base/values.h"
++#include "chrome/browser/phlink/adblock/engine_provider.h"
++#include "chrome/browser/phlink/adblock/phlink_adblock_prefs.h"
++#include "components/prefs/pref_service.h"
++
++namespace phlink::adblock {
++
++AdblockSettingsService::AdblockSettingsService(PrefService* prefs)
++    : prefs_(prefs) {
++  registrar_.Init(prefs_);
++  registrar_.Add(
++      kAdblockEnabled,
++      base::BindRepeating(&AdblockSettingsService::PushPrefsToEngineProvider,
++                          base::Unretained(this)));
++  registrar_.Add(
++      kAdblockExceptions,
++      base::BindRepeating(&AdblockSettingsService::PushPrefsToEngineProvider,
++                          base::Unretained(this)));
++  PushPrefsToEngineProvider();
++}
++
++AdblockSettingsService::~AdblockSettingsService() = default;
++
++void AdblockSettingsService::PushPrefsToEngineProvider() {
++  EngineProvider* provider = EngineProvider::GetInstance();
++  provider->SetEnabled(prefs_->GetBoolean(kAdblockEnabled));
++
++  std::unordered_set<std::string> domains;
++  for (const base::Value& entry : prefs_->GetList(kAdblockExceptions)) {
++    if (!entry.is_string()) {
++      continue;
++    }
++    std::string domain = base::ToLowerASCII(entry.GetString());
++    if (!domain.empty()) {
++      domains.insert(std::move(domain));
++    }
++  }
++  provider->SetExceptionDomains(std::move(domains));
++}
++
++}  // namespace phlink::adblock
+diff --git a/chrome/browser/phlink/adblock/adblock_settings_service.h b/chrome/browser/phlink/adblock/adblock_settings_service.h
+new file mode 100644
+index 0000000000000..4ffa227695cef
+--- /dev/null
++++ b/chrome/browser/phlink/adblock/adblock_settings_service.h
+@@ -0,0 +1,42 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_PHLINK_ADBLOCK_ADBLOCK_SETTINGS_SERVICE_H_
++#define CHROME_BROWSER_PHLINK_ADBLOCK_ADBLOCK_SETTINGS_SERVICE_H_
++
++#include "base/memory/raw_ptr.h"
++#include "components/keyed_service/core/keyed_service.h"
++#include "components/prefs/pref_change_registrar.h"
++
++class PrefService;
++
++namespace phlink::adblock {
++
++// Per-profile bridge that mirrors the user's adblock prefs
++// (`phlink.adblock.enabled`, `phlink.adblock.exceptions`) into the
++// process-global `EngineProvider` runtime gate. With phlink's
++// single-profile-per-session expectation in v1, the most-recently
++// initialized profile wins — sufficient for the master switch and
++// per-site exceptions, both of which are user-facing toggles. A
++// future profile-aware gate can replace this without touching
++// throttle / cosmetic-host code.
++class AdblockSettingsService : public KeyedService {
++ public:
++  explicit AdblockSettingsService(PrefService* prefs);
++
++  AdblockSettingsService(const AdblockSettingsService&) = delete;
++  AdblockSettingsService& operator=(const AdblockSettingsService&) = delete;
++
++  ~AdblockSettingsService() override;
++
++ private:
++  void PushPrefsToEngineProvider();
++
++  const raw_ptr<PrefService> prefs_;
++  PrefChangeRegistrar registrar_;
++};
++
++}  // namespace phlink::adblock
++
++#endif  // CHROME_BROWSER_PHLINK_ADBLOCK_ADBLOCK_SETTINGS_SERVICE_H_
+diff --git a/chrome/browser/phlink/adblock/adblock_settings_service_factory.cc b/chrome/browser/phlink/adblock/adblock_settings_service_factory.cc
+new file mode 100644
+index 0000000000000..11c07f2db73cc
+--- /dev/null
++++ b/chrome/browser/phlink/adblock/adblock_settings_service_factory.cc
+@@ -0,0 +1,52 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/phlink/adblock/adblock_settings_service_factory.h"
++
++#include <memory>
++
++#include "base/no_destructor.h"
++#include "chrome/browser/phlink/adblock/adblock_settings_service.h"
++#include "chrome/browser/profiles/profile.h"
++
++namespace phlink::adblock {
++
++// static
++AdblockSettingsService* AdblockSettingsServiceFactory::GetForProfile(
++    Profile* profile) {
++  return static_cast<AdblockSettingsService*>(
++      GetInstance()->GetServiceForBrowserContext(profile, /*create=*/true));
++}
++
++// static
++AdblockSettingsServiceFactory* AdblockSettingsServiceFactory::GetInstance() {
++  static base::NoDestructor<AdblockSettingsServiceFactory> instance;
++  return instance.get();
++}
++
++AdblockSettingsServiceFactory::AdblockSettingsServiceFactory()
++    : ProfileKeyedServiceFactory(
++          "PhlinkAdblockSettingsService",
++          ProfileSelections::Builder()
++              .WithRegular(ProfileSelection::kOwnInstance)
++              // Incognito inherits from regular: incognito sessions
++              // observe the regular profile's switch, no separate
++              // pref store needed.
++              .WithGuest(ProfileSelection::kNone)
++              .Build()) {}
++
++AdblockSettingsServiceFactory::~AdblockSettingsServiceFactory() = default;
++
++std::unique_ptr<KeyedService>
++AdblockSettingsServiceFactory::BuildServiceInstanceForBrowserContext(
++    content::BrowserContext* context) const {
++  Profile* profile = Profile::FromBrowserContext(context);
++  return std::make_unique<AdblockSettingsService>(profile->GetPrefs());
++}
++
++bool AdblockSettingsServiceFactory::ServiceIsCreatedWithBrowserContext() const {
++  return true;
++}
++
++}  // namespace phlink::adblock
+diff --git a/chrome/browser/phlink/adblock/adblock_settings_service_factory.h b/chrome/browser/phlink/adblock/adblock_settings_service_factory.h
+new file mode 100644
+index 0000000000000..a657f740ab0f2
+--- /dev/null
++++ b/chrome/browser/phlink/adblock/adblock_settings_service_factory.h
+@@ -0,0 +1,40 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_PHLINK_ADBLOCK_ADBLOCK_SETTINGS_SERVICE_FACTORY_H_
++#define CHROME_BROWSER_PHLINK_ADBLOCK_ADBLOCK_SETTINGS_SERVICE_FACTORY_H_
++
++#include "base/no_destructor.h"
++#include "chrome/browser/profiles/profile_keyed_service_factory.h"
++
++class Profile;
++
++namespace phlink::adblock {
++
++class AdblockSettingsService;
++
++class AdblockSettingsServiceFactory : public ProfileKeyedServiceFactory {
++ public:
++  static AdblockSettingsService* GetForProfile(Profile* profile);
++  static AdblockSettingsServiceFactory* GetInstance();
++
++  AdblockSettingsServiceFactory(const AdblockSettingsServiceFactory&) = delete;
++  AdblockSettingsServiceFactory& operator=(
++      const AdblockSettingsServiceFactory&) = delete;
++
++ private:
++  friend base::NoDestructor<AdblockSettingsServiceFactory>;
++
++  AdblockSettingsServiceFactory();
++  ~AdblockSettingsServiceFactory() override;
++
++  // BrowserContextKeyedServiceFactory:
++  std::unique_ptr<KeyedService> BuildServiceInstanceForBrowserContext(
++      content::BrowserContext* context) const override;
++  bool ServiceIsCreatedWithBrowserContext() const override;
++};
++
++}  // namespace phlink::adblock
++
++#endif  // CHROME_BROWSER_PHLINK_ADBLOCK_ADBLOCK_SETTINGS_SERVICE_FACTORY_H_
+diff --git a/chrome/browser/phlink/adblock/cosmetic_filter_host.cc b/chrome/browser/phlink/adblock/cosmetic_filter_host.cc
+index 0b73c430979bd..4f026d48bef51 100644
+--- a/chrome/browser/phlink/adblock/cosmetic_filter_host.cc
++++ b/chrome/browser/phlink/adblock/cosmetic_filter_host.cc
+@@ -48,7 +48,17 @@ void CosmeticFilterHost::GetCosmeticResources(
+     return;
+   }
+ 
+-  Engine* engine = EngineProvider::GetInstance()->GetEngine();
++  // Master switch + per-site exception gate (mirrored from the active
++  // profile's `phlink.adblock.*` prefs by AdblockSettingsService). When
++  // the user has disabled phlink-adblock for this site, return empty
++  // cosmetic resources so the renderer agent injects nothing.
++  EngineProvider* provider = EngineProvider::GetInstance();
++  if (!provider->IsActiveForUrl(url)) {
++    std::move(callback).Run(std::move(out));
++    return;
++  }
++
++  Engine* engine = provider->GetEngine();
+   // EngineProvider always returns a non-null engine (empty fallback);
+   // guard defensively in case 5-06's pref toggle later returns null.
+   if (!engine) {
+diff --git a/chrome/browser/phlink/adblock/engine_provider.cc b/chrome/browser/phlink/adblock/engine_provider.cc
+index 450c138e1fab6..b88550a5587ad 100644
+--- a/chrome/browser/phlink/adblock/engine_provider.cc
++++ b/chrome/browser/phlink/adblock/engine_provider.cc
+@@ -9,7 +9,9 @@
+ 
+ #include "base/no_destructor.h"
+ #include "chrome/browser/phlink/adblock/phlink_adblock.h"
++#include "net/base/registry_controlled_domains/registry_controlled_domain.h"
+ #include "third_party/phlink_filter_lists/bundled_rules.h"
++#include "url/gurl.h"
+ 
+ namespace phlink::adblock {
+ 
+@@ -41,4 +43,38 @@ void EngineProvider::SetEngineFromRulesForTesting(std::string_view rules) {
+   engine_ = std::move(fresh);
+ }
+ 
++bool EngineProvider::IsActiveForUrl(const GURL& url) const {
++  if (!enabled_.load(std::memory_order_relaxed)) {
++    return false;
++  }
++  if (!url.is_valid() || !url.SchemeIsHTTPOrHTTPS()) {
++    return false;
++  }
++  const std::string domain =
++      net::registry_controlled_domains::GetDomainAndRegistry(
++          url, net::registry_controlled_domains::INCLUDE_PRIVATE_REGISTRIES);
++  if (domain.empty()) {
++    // Hosts like raw IPs / localhost don't have a registrable domain.
++    // Fall through to "active" — exception list is keyed on eTLD+1
++    // and can't represent these.
++    return true;
++  }
++  std::lock_guard<std::mutex> lock(exceptions_mutex_);
++  return exception_domains_.find(domain) == exception_domains_.end();
++}
++
++void EngineProvider::SetEnabled(bool enabled) {
++  enabled_.store(enabled, std::memory_order_relaxed);
++}
++
++bool EngineProvider::IsEnabled() const {
++  return enabled_.load(std::memory_order_relaxed);
++}
++
++void EngineProvider::SetExceptionDomains(
++    std::unordered_set<std::string> domains) {
++  std::lock_guard<std::mutex> lock(exceptions_mutex_);
++  exception_domains_ = std::move(domains);
++}
++
+ }  // namespace phlink::adblock
+diff --git a/chrome/browser/phlink/adblock/engine_provider.h b/chrome/browser/phlink/adblock/engine_provider.h
+index d3e8ee3383260..969ef6b4e024e 100644
+--- a/chrome/browser/phlink/adblock/engine_provider.h
++++ b/chrome/browser/phlink/adblock/engine_provider.h
+@@ -5,32 +5,38 @@
+ #ifndef CHROME_BROWSER_PHLINK_ADBLOCK_ENGINE_PROVIDER_H_
+ #define CHROME_BROWSER_PHLINK_ADBLOCK_ENGINE_PROVIDER_H_
+ 
++#include <atomic>
+ #include <memory>
+ #include <mutex>
++#include <string>
+ #include <string_view>
++#include <unordered_set>
+ 
+ namespace base {
+ template <typename T>
+ class NoDestructor;
+ }  // namespace base
+ 
++class GURL;
++
+ namespace phlink::adblock {
+ 
+ class Engine;
+ 
+-// Process-global owner of the network-side adblock engine.
+-//
+-// Phase 5-03: a single `Engine` lives for the life of the browser process,
+-// initialized lazily on first access with an empty rule set. Plan 5-04
+-// will replace the empty-engine seed with the bundled filter lists.
++// Process-global owner of the network-side adblock engine plus the
++// runtime gate (enabled flag + per-domain exception set) that the
++// browser-process throttle and the cosmetic-filter Mojo host both
++// consult. The runtime gate is mirrored from each profile's prefs
++// (`phlink.adblock.enabled`, `phlink.adblock.exceptions`) by the
++// per-profile `AdblockSettingsService`.
+ //
+-// Thread-safety: `GetEngine()` is safe to call from any thread. The
+-// returned pointer is owned by the provider; the underlying `Engine` is
+-// itself internally synchronized (Mutex inside `adblock-rust`), so
+-// callers may call `ShouldBlock` concurrently from any sequence.
++// Thread-safety: `GetEngine()`, `IsActiveForUrl()`, `SetEnabled()`,
++// `SetExceptionDomains()` are safe to call from any thread. The
++// underlying `Engine` is itself internally synchronized.
+ //
+-// The header intentionally avoids including any `base/` headers so that
+-// downstream test targets do not need a transitive partition_alloc dep.
++// The header intentionally avoids including any `base/` headers so
++// that downstream test targets do not need a transitive
++// partition_alloc dep.
+ class EngineProvider {
+  public:
+   static EngineProvider* GetInstance();
+@@ -41,6 +47,22 @@ class EngineProvider {
+   // Returns the live engine pointer. Never null.
+   Engine* GetEngine();
+ 
++  // Returns true iff phlink should evaluate `url` against the engine —
++  // i.e. the master switch is on AND `url`'s registrable domain is not
++  // in the exception set. Callers (throttle / cosmetic host) should
++  // gate all blocking + cosmetic work on this return value.
++  //
++  // Empty / non-http(s) URLs return `false` (treated as inactive).
++  bool IsActiveForUrl(const GURL& url) const;
++
++  // Master enabled flag. Default true.
++  void SetEnabled(bool enabled);
++  bool IsEnabled() const;
++
++  // Replaces the exception set with `domains` (each entry is a
++  // registrable domain / eTLD+1, lowercase, no scheme).
++  void SetExceptionDomains(std::unordered_set<std::string> domains);
++
+   // Test seam: replace the live engine with one built from `rules`.
+   void SetEngineFromRulesForTesting(std::string_view rules);
+ 
+@@ -52,6 +74,15 @@ class EngineProvider {
+ 
+   mutable std::mutex mutex_;
+   std::unique_ptr<Engine> engine_;
++
++  // Atomic so the throttle hot-path doesn't need to take a lock just
++  // to check the master switch.
++  std::atomic<bool> enabled_{true};
++
++  // Lock-protected because the set can be replaced wholesale by the
++  // settings service when the user edits the per-site list.
++  mutable std::mutex exceptions_mutex_;
++  std::unordered_set<std::string> exception_domains_;
+ };
+ 
+ }  // namespace phlink::adblock
+diff --git a/chrome/browser/phlink/adblock/phlink_adblock_prefs.cc b/chrome/browser/phlink/adblock/phlink_adblock_prefs.cc
+new file mode 100644
+index 0000000000000..dcf6bddddffaa
+--- /dev/null
++++ b/chrome/browser/phlink/adblock/phlink_adblock_prefs.cc
+@@ -0,0 +1,16 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/phlink/adblock/phlink_adblock_prefs.h"
++
++#include "components/pref_registry/pref_registry_syncable.h"
++
++namespace phlink::adblock {
++
++void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry) {
++  registry->RegisterBooleanPref(kAdblockEnabled, true);
++  registry->RegisterListPref(kAdblockExceptions);
++}
++
++}  // namespace phlink::adblock
+diff --git a/chrome/browser/phlink/adblock/phlink_adblock_prefs.h b/chrome/browser/phlink/adblock/phlink_adblock_prefs.h
+new file mode 100644
+index 0000000000000..f5b84ab1126f0
+--- /dev/null
++++ b/chrome/browser/phlink/adblock/phlink_adblock_prefs.h
+@@ -0,0 +1,28 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_PHLINK_ADBLOCK_PHLINK_ADBLOCK_PREFS_H_
++#define CHROME_BROWSER_PHLINK_ADBLOCK_PHLINK_ADBLOCK_PREFS_H_
++
++namespace user_prefs {
++class PrefRegistrySyncable;
++}  // namespace user_prefs
++
++namespace phlink::adblock {
++
++// Boolean. When false, phlink does not block requests, does not inject
++// cosmetic CSS, and does not run scriptlets. Default: true.
++inline constexpr char kAdblockEnabled[] = "phlink.adblock.enabled";
++
++// List<string>. Each entry is a registrable domain (eTLD+1) on which
++// adblock is fully disabled (request blocking + cosmetic). Default: [].
++inline constexpr char kAdblockExceptions[] = "phlink.adblock.exceptions";
++
++// Registers the phlink-adblock profile prefs with their defaults.
++// Called from `chrome/browser/prefs/browser_prefs.cc::RegisterProfilePrefs`.
++void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry);
++
++}  // namespace phlink::adblock
++
++#endif  // CHROME_BROWSER_PHLINK_ADBLOCK_PHLINK_ADBLOCK_PREFS_H_
+diff --git a/chrome/browser/phlink/adblock/phlink_adblock_throttle.cc b/chrome/browser/phlink/adblock/phlink_adblock_throttle.cc
+index cf001934b3fce..df0ab6ba344bf 100644
+--- a/chrome/browser/phlink/adblock/phlink_adblock_throttle.cc
++++ b/chrome/browser/phlink/adblock/phlink_adblock_throttle.cc
+@@ -111,8 +111,14 @@ void PhlinkAdblockThrottle::WillStartRequest(network::ResourceRequest* request,
+   if (!engine_ || !request) {
+     return;
+   }
+-  if (ShouldBlock(request->url, DeriveSourceUrl(*request),
+-                  request->destination)) {
++  const GURL source_url = DeriveSourceUrl(*request);
++  // Master switch + per-site exception gate. We check the *source*
++  // (initiator / page) URL so the user's "disable on this site"
++  // exception correctly applies to all sub-resources of that page.
++  if (!EngineProvider::GetInstance()->IsActiveForUrl(source_url)) {
++    return;
++  }
++  if (ShouldBlock(request->url, source_url, request->destination)) {
+     delegate_->CancelWithError(net::ERR_BLOCKED_BY_CLIENT,
+                                "phlink-adblock");
+   }
+@@ -128,6 +134,15 @@ void PhlinkAdblockThrottle::WillRedirectRequest(
+   if (!engine_ || !redirect_info) {
+     return;
+   }
++  // Master switch gate. The per-site exception list is keyed on the
++  // page's eTLD+1 — RedirectInfo doesn't always carry one
++  // (`new_site_for_cookies` is opaque for some loads), so on
++  // redirects we conservatively only honor the master switch and let
++  // ShouldBlock evaluate. The next internally-restarted load passes
++  // through WillStartRequest where we have a precise source URL.
++  if (!EngineProvider::GetInstance()->IsEnabled()) {
++    return;
++  }
+   // We don't have the original ResourceRequest here, but
+   // RedirectInfo carries enough to re-evaluate the destination URL.
+   // Use the redirect's site_for_cookies as the source URL hint.
+diff --git a/chrome/browser/phlink/adblock/phlink_adblock_unittest.cc b/chrome/browser/phlink/adblock/phlink_adblock_unittest.cc
+index 14d95701cb8aa..2484c4ae79410 100644
+--- a/chrome/browser/phlink/adblock/phlink_adblock_unittest.cc
++++ b/chrome/browser/phlink/adblock/phlink_adblock_unittest.cc
+@@ -9,6 +9,7 @@
+ #include "chrome/browser/phlink/adblock/engine_provider.h"
+ #include "testing/gtest/include/gtest/gtest.h"
+ #include "third_party/phlink_filter_lists/bundled_rules.h"
++#include "url/gurl.h"
+ 
+ namespace phlink::adblock {
+ namespace {
+@@ -144,5 +145,33 @@ TEST(PhlinkAdblockCosmeticTest, EmptyEngineYieldsNoSelectors) {
+   EXPECT_TRUE(r.injected_script.empty());
+ }
+ 
++// 5-06a: process-global runtime gate exposed by EngineProvider.
++TEST(PhlinkAdblockEngineProviderGateTest, MasterSwitchOff) {
++  auto* provider = EngineProvider::GetInstance();
++  provider->SetEnabled(false);
++  EXPECT_FALSE(provider->IsActiveForUrl(GURL("https://example.test/")));
++  provider->SetEnabled(true);
++  EXPECT_TRUE(provider->IsActiveForUrl(GURL("https://example.test/")));
++}
++
++TEST(PhlinkAdblockEngineProviderGateTest, NonHttpSchemeInactive) {
++  auto* provider = EngineProvider::GetInstance();
++  provider->SetEnabled(true);
++  EXPECT_FALSE(provider->IsActiveForUrl(GURL("chrome://newtab/")));
++  EXPECT_FALSE(provider->IsActiveForUrl(GURL("about:blank")));
++  EXPECT_FALSE(provider->IsActiveForUrl(GURL("file:///tmp/x.html")));
++}
++
++TEST(PhlinkAdblockEngineProviderGateTest, ExceptionDomainSuppressesActivity) {
++  auto* provider = EngineProvider::GetInstance();
++  provider->SetEnabled(true);
++  provider->SetExceptionDomains({"example.test"});
++  EXPECT_FALSE(provider->IsActiveForUrl(GURL("https://example.test/x")));
++  EXPECT_FALSE(provider->IsActiveForUrl(GURL("https://www.example.test/x")));
++  EXPECT_TRUE(provider->IsActiveForUrl(GURL("https://other.test/x")));
++  // Restore for hermeticity across tests.
++  provider->SetExceptionDomains({});
++}
++
+ }  // namespace
+ }  // namespace phlink::adblock
+diff --git a/chrome/browser/prefs/BUILD.gn b/chrome/browser/prefs/BUILD.gn
+index f138baf99239f..a7e81ffae5ea5 100644
+--- a/chrome/browser/prefs/BUILD.gn
++++ b/chrome/browser/prefs/BUILD.gn
+@@ -86,6 +86,7 @@ source_set("impl") {
+     "//chrome/browser/metrics",
+     "//chrome/browser/net",
+     "//chrome/browser/permissions",
++    "//chrome/browser/phlink/adblock:phlink_adblock",
+     "//chrome/browser/platform_experience:prefs",
+     "//chrome/browser/preloading:prefs",
+     "//chrome/browser/preloading/prefetch/prefetch_service",
+diff --git a/chrome/browser/prefs/browser_prefs.cc b/chrome/browser/prefs/browser_prefs.cc
+index 25d86bd127e12..ba629e978f85d 100644
+--- a/chrome/browser/prefs/browser_prefs.cc
++++ b/chrome/browser/prefs/browser_prefs.cc
+@@ -53,6 +53,7 @@
+ #include "chrome/browser/notifications/notifier_state_tracker.h"
+ #include "chrome/browser/notifications/platform_notification_service_impl.h"
+ #include "chrome/browser/permissions/quiet_notification_permission_ui_state.h"
++#include "chrome/browser/phlink/adblock/phlink_adblock_prefs.h"
+ #include "chrome/browser/platform_experience/prefs.h"
+ #include "chrome/browser/prefs/chrome_pref_service_factory.h"
+ #include "chrome/browser/prefs/incognito_mode_prefs.h"
+@@ -2165,6 +2166,9 @@ void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry,
+ 
+   registry->RegisterBooleanPref(prefs::kViewSourceLineWrappingEnabled, false);
+ 
++  // phlink: adblock master switch + per-site exception list.
++  phlink::adblock::RegisterProfilePrefs(registry);
++
+   // TODO(crbug.com/442891187): Move these to appropriate manager files when
+   // the policies logic is implemented.
+   registry->RegisterListPref(policy::policy_prefs::kIncognitoModeUrlBlocklist);
+diff --git a/chrome/browser/profiles/BUILD.gn b/chrome/browser/profiles/BUILD.gn
+index 80a881182a8f5..453c8e92ffd0e 100644
+--- a/chrome/browser/profiles/BUILD.gn
++++ b/chrome/browser/profiles/BUILD.gn
+@@ -444,6 +444,7 @@ source_set("profiles_extra_parts_impl") {
+     "//chrome/browser/performance_manager",
+     "//chrome/browser/permissions",
+     "//chrome/browser/persisted_state_db",
++    "//chrome/browser/phlink/adblock:phlink_adblock",
+     "//chrome/browser/plus_addresses",
+     "//chrome/browser/predictors",
+     "//chrome/browser/prefs",
+diff --git a/chrome/browser/profiles/chrome_browser_main_extra_parts_profiles.cc b/chrome/browser/profiles/chrome_browser_main_extra_parts_profiles.cc
+index 4e3655bf9bc90..d4aeb1862d04f 100644
+--- a/chrome/browser/profiles/chrome_browser_main_extra_parts_profiles.cc
++++ b/chrome/browser/profiles/chrome_browser_main_extra_parts_profiles.cc
+@@ -177,6 +177,7 @@
+ #include "chrome/browser/permissions/prediction_service/prediction_model_handler_provider_factory.h"
+ #include "chrome/browser/permissions/prediction_service/prediction_service_factory.h"
+ #include "chrome/browser/persisted_state_db/session_proto_db_factory.h"
++#include "chrome/browser/phlink/adblock/adblock_settings_service_factory.h"
+ #include "chrome/browser/plugins/plugin_prefs_factory.h"
+ #include "chrome/browser/plus_addresses/plus_address_service_factory.h"
+ #include "chrome/browser/plus_addresses/plus_address_setting_service_factory.h"
+@@ -1238,6 +1239,9 @@ void ChromeBrowserMainExtraPartsProfiles::
+   PluginInfoHostImpl::EnsureFactoryBuilt();
+   PluginPrefsFactory::GetInstance();
+ #endif
++  // phlink: per-profile bridge that mirrors `phlink.adblock.*` prefs
++  // into the process-global EngineProvider runtime gate.
++  phlink::adblock::AdblockSettingsServiceFactory::GetInstance();
+   PlusAddressServiceFactory::GetInstance();
+   PlusAddressSettingServiceFactory::GetInstance();
+ #if BUILDFLAG(IS_CHROMEOS)
+-- 
+2.50.1 (Apple Git-155)
+
