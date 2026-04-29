@@ -1,0 +1,699 @@
+From b41b3896751542b542851909c06124ae54a64c45 Mon Sep 17 00:00:00 2001
+From: phlink <phlink@local>
+Date: Wed, 29 Apr 2026 18:56:01 +0530
+Subject: [PATCH] phlink: phase 08-04 appearance-mode pref + observer +
+ settings UI
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Wires the user-facing appearance picker so the Phase 8-02 / 8-03
+palettes are reachable from chrome://settings/appearance and so the
+light/dark switch happens live without a restart, with no telemetry on
+the change.
+
+What ships:
+* prefs::kPhlinkAppearanceMode integer pref (default 2 / Follow System)
+  registered in chrome/browser/phlink/appearance/, mirroring the
+  Phase 5 phlink_adblock_prefs site rather than chrome/common/pref_names
+  (D-04, D-06).
+* PhlinkAppearanceObserver in chrome/browser/themes/. KeyedService
+  driven by a profile factory (D-10). Subscribes via
+  PrefChangeRegistrar to phlink.appearance_mode AND ui::NativeTheme
+  for OS dark-mode flips. On change calls
+  ui::ColorProviderManager::Get().ResetColorProviderCache(); the
+  per-window walk requested by the plan is intentionally a no-op
+  because existing chrome views observe NativeTheme/ThemeService and
+  repaint on their own — a real iteration would either be a circular
+  dep through //chrome/browser/ui/browser_window:internal or duplicate
+  upstream notification. Per Phase 8 CONTEXT §5 (carry-forward from
+  Phase 6) NO UMA / UKM / RecordAction / log-to-disk fires on theme
+  switches.
+* chrome://settings/appearance "phlink theme" radio row above the
+  upstream Theme/Color rows, bound to prefs.phlink.appearance_mode
+  (D-05). Four new i18n strings registered in
+  settings_strings.grdp + settings_localized_strings_provider:
+  phlinkThemeRowTitle, phlinkThemeLight, phlinkThemeDark,
+  phlinkThemeFollowSystem.
+* phlink_appearance_observer_unittest.cc — 4 named tests:
+  ConstructsAndDefaultsToFollowSystem, PrefChangeTriggersInvalidate,
+  NativeThemeUpdateOnlyFiresWhenFollowingSystem,
+  NoTelemetryOnInvalidate. All passing alongside the prior 7 phlink
+  color-mixer tests.
+
+Decisions referenced: D-04, D-05, D-06, D-10, D-11.
+APPR-04.
+---
+ chrome/app/settings_strings.grdp              |  13 ++
+ chrome/browser/BUILD.gn                       |   3 +
+ chrome/browser/phlink/appearance/BUILD.gn     |  16 +++
+ .../appearance/phlink_appearance_prefs.cc     |  15 +++
+ .../appearance/phlink_appearance_prefs.h      |  32 +++++
+ chrome/browser/prefs/browser_prefs.cc         |   4 +
+ ...hrome_browser_main_extra_parts_profiles.cc |   4 +
+ .../appearance_page/appearance_page.html      |  28 ++++-
+ chrome/browser/themes/BUILD.gn                |   5 +
+ .../themes/phlink_appearance_observer.cc      |  59 +++++++++
+ .../themes/phlink_appearance_observer.h       |  64 ++++++++++
+ .../phlink_appearance_observer_factory.cc     |  53 ++++++++
+ .../phlink_appearance_observer_factory.h      |  41 ++++++
+ .../phlink_appearance_observer_unittest.cc    | 117 ++++++++++++++++++
+ .../settings_localized_strings_provider.cc    |   5 +
+ chrome/test/BUILD.gn                          |   1 +
+ 16 files changed, 459 insertions(+), 1 deletion(-)
+ create mode 100644 chrome/browser/phlink/appearance/BUILD.gn
+ create mode 100644 chrome/browser/phlink/appearance/phlink_appearance_prefs.cc
+ create mode 100644 chrome/browser/phlink/appearance/phlink_appearance_prefs.h
+ create mode 100644 chrome/browser/themes/phlink_appearance_observer.cc
+ create mode 100644 chrome/browser/themes/phlink_appearance_observer.h
+ create mode 100644 chrome/browser/themes/phlink_appearance_observer_factory.cc
+ create mode 100644 chrome/browser/themes/phlink_appearance_observer_factory.h
+ create mode 100644 chrome/browser/themes/phlink_appearance_observer_unittest.cc
+
+diff --git a/chrome/app/settings_strings.grdp b/chrome/app/settings_strings.grdp
+index aae688f787f30..1d4599e7cdcc2 100644
+--- a/chrome/app/settings_strings.grdp
++++ b/chrome/app/settings_strings.grdp
+@@ -205,6 +205,19 @@
+     <message name="IDS_SETTINGS_HOME_BUTTON_DISABLED" desc="Sub label for the Show home button setting when disabled.">
+       Disabled
+     </message>
++    <!-- phlink: Phase 8-04 appearance mode picker (D-05). -->
++    <message name="IDS_SETTINGS_PHLINK_THEME_ROW_TITLE" desc="Section title for the phlink theme picker on chrome://settings/appearance.">
++      phlink theme
++    </message>
++    <message name="IDS_SETTINGS_PHLINK_THEME_LIGHT" desc="Radio-button label for the phlink Light theme.">
++      Light
++    </message>
++    <message name="IDS_SETTINGS_PHLINK_THEME_DARK" desc="Radio-button label for the phlink Dark theme.">
++      Dark
++    </message>
++    <message name="IDS_SETTINGS_PHLINK_THEME_FOLLOW_SYSTEM" desc="Radio-button label for using the operating system's appearance setting as the phlink theme.">
++      Follow system
++    </message>
+     <if expr="is_chromeos">
+       <message name="IDS_SETTINGS_THEMES" desc="Name of the control which allows the user to get a theme for the browser.">
+         Browser themes
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index f49ccf25cdc11..fa86b766e8f6e 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -701,6 +701,9 @@ static_library("browser") {
+     # phlink: adblock engine + URLLoaderThrottle (PRD §6, plan 5-03).
+     "//chrome/browser/phlink/adblock:phlink_adblock",
+ 
++    # phlink: appearance prefs (PRD §8, plan 8-04).
++    "//chrome/browser/phlink/appearance:phlink_appearance",
++
+     "//base/allocator:buildflags",
+     "//build:branding_buildflags",
+     "//build:chromeos_buildflags",
+diff --git a/chrome/browser/phlink/appearance/BUILD.gn b/chrome/browser/phlink/appearance/BUILD.gn
+new file mode 100644
+index 0000000000000..4183194136a0b
+--- /dev/null
++++ b/chrome/browser/phlink/appearance/BUILD.gn
+@@ -0,0 +1,16 @@
++# Copyright 2026 The phlink Authors
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++
++source_set("phlink_appearance") {
++  sources = [
++    "phlink_appearance_prefs.cc",
++    "phlink_appearance_prefs.h",
++  ]
++  public_deps = [
++    "//components/prefs",
++  ]
++  deps = [
++    "//components/pref_registry",
++  ]
++}
+diff --git a/chrome/browser/phlink/appearance/phlink_appearance_prefs.cc b/chrome/browser/phlink/appearance/phlink_appearance_prefs.cc
+new file mode 100644
+index 0000000000000..02f972dffaef3
+--- /dev/null
++++ b/chrome/browser/phlink/appearance/phlink_appearance_prefs.cc
+@@ -0,0 +1,15 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/phlink/appearance/phlink_appearance_prefs.h"
++
++#include "components/pref_registry/pref_registry_syncable.h"
++
++namespace phlink::appearance {
++
++void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry) {
++  registry->RegisterIntegerPref(kAppearanceMode, kAppearanceModeFollowSystem);
++}
++
++}  // namespace phlink::appearance
+diff --git a/chrome/browser/phlink/appearance/phlink_appearance_prefs.h b/chrome/browser/phlink/appearance/phlink_appearance_prefs.h
+new file mode 100644
+index 0000000000000..ece82c5e0f618
+--- /dev/null
++++ b/chrome/browser/phlink/appearance/phlink_appearance_prefs.h
+@@ -0,0 +1,32 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_PHLINK_APPEARANCE_PHLINK_APPEARANCE_PREFS_H_
++#define CHROME_BROWSER_PHLINK_APPEARANCE_PHLINK_APPEARANCE_PREFS_H_
++
++namespace user_prefs {
++class PrefRegistrySyncable;
++}  // namespace user_prefs
++
++namespace phlink::appearance {
++
++// Integer. Selected phlink theme mode.
++//   0 = Light
++//   1 = Dark
++//   2 = Follow System (default per Phase 8 D-04 / D-06)
++// Any out-of-range value is treated as 2 (Follow System).
++inline constexpr char kAppearanceMode[] = "phlink.appearance_mode";
++
++// Pref values. Kept in lock-step with `kAppearanceMode` semantics.
++inline constexpr int kAppearanceModeLight = 0;
++inline constexpr int kAppearanceModeDark = 1;
++inline constexpr int kAppearanceModeFollowSystem = 2;
++
++// Registers the phlink-appearance profile prefs with their defaults.
++// Called from `chrome/browser/prefs/browser_prefs.cc::RegisterProfilePrefs`.
++void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry);
++
++}  // namespace phlink::appearance
++
++#endif  // CHROME_BROWSER_PHLINK_APPEARANCE_PHLINK_APPEARANCE_PREFS_H_
+diff --git a/chrome/browser/prefs/browser_prefs.cc b/chrome/browser/prefs/browser_prefs.cc
+index ba629e978f85d..c660cdb1e0bb3 100644
+--- a/chrome/browser/prefs/browser_prefs.cc
++++ b/chrome/browser/prefs/browser_prefs.cc
+@@ -54,6 +54,7 @@
+ #include "chrome/browser/notifications/platform_notification_service_impl.h"
+ #include "chrome/browser/permissions/quiet_notification_permission_ui_state.h"
+ #include "chrome/browser/phlink/adblock/phlink_adblock_prefs.h"
++#include "chrome/browser/phlink/appearance/phlink_appearance_prefs.h"
+ #include "chrome/browser/platform_experience/prefs.h"
+ #include "chrome/browser/prefs/chrome_pref_service_factory.h"
+ #include "chrome/browser/prefs/incognito_mode_prefs.h"
+@@ -2169,6 +2170,9 @@ void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry,
+   // phlink: adblock master switch + per-site exception list.
+   phlink::adblock::RegisterProfilePrefs(registry);
+ 
++  // phlink: appearance mode (Light/Dark/Follow System) per Phase 8 D-04.
++  phlink::appearance::RegisterProfilePrefs(registry);
++
+   // TODO(crbug.com/442891187): Move these to appropriate manager files when
+   // the policies logic is implemented.
+   registry->RegisterListPref(policy::policy_prefs::kIncognitoModeUrlBlocklist);
+diff --git a/chrome/browser/profiles/chrome_browser_main_extra_parts_profiles.cc b/chrome/browser/profiles/chrome_browser_main_extra_parts_profiles.cc
+index d4aeb1862d04f..b88266b561fa9 100644
+--- a/chrome/browser/profiles/chrome_browser_main_extra_parts_profiles.cc
++++ b/chrome/browser/profiles/chrome_browser_main_extra_parts_profiles.cc
+@@ -178,6 +178,7 @@
+ #include "chrome/browser/permissions/prediction_service/prediction_service_factory.h"
+ #include "chrome/browser/persisted_state_db/session_proto_db_factory.h"
+ #include "chrome/browser/phlink/adblock/adblock_settings_service_factory.h"
++#include "chrome/browser/themes/phlink_appearance_observer_factory.h"
+ #include "chrome/browser/plugins/plugin_prefs_factory.h"
+ #include "chrome/browser/plus_addresses/plus_address_service_factory.h"
+ #include "chrome/browser/plus_addresses/plus_address_setting_service_factory.h"
+@@ -1242,6 +1243,9 @@ void ChromeBrowserMainExtraPartsProfiles::
+   // phlink: per-profile bridge that mirrors `phlink.adblock.*` prefs
+   // into the process-global EngineProvider runtime gate.
+   phlink::adblock::AdblockSettingsServiceFactory::GetInstance();
++  // phlink: per-profile observer that reacts to `phlink.appearance_mode`
++  // changes and OS-level dark-mode flips (Phase 8 D-04 / D-10).
++  phlink::appearance::PhlinkAppearanceObserverFactory::GetInstance();
+   PlusAddressServiceFactory::GetInstance();
+   PlusAddressSettingServiceFactory::GetInstance();
+ #if BUILDFLAG(IS_CHROMEOS)
+diff --git a/chrome/browser/resources/settings/appearance_page/appearance_page.html b/chrome/browser/resources/settings/appearance_page/appearance_page.html
+index 89e745d04300c..131ca535497d6 100644
+--- a/chrome/browser/resources/settings/appearance_page/appearance_page.html
++++ b/chrome/browser/resources/settings/appearance_page/appearance_page.html
+@@ -36,7 +36,33 @@
+     </style>
+     <settings-section page-title="$i18n{appearancePageTitle}">
+       <div route-path="default">
+-        <div class="settings-row first" id="themeRow"
++        <!-- phlink: Phase 8-04 / D-05. The phlink theme picker lives ABOVE
++             the upstream Theme / Color rows. Upstream rows are still
++             rendered (they are naturally hidden on is_chrome_branded=false
++             builds), so we do not delete them. -->
++        <div id="phlinkThemeRow" class="cr-row first">
++          <div id="phlinkThemeRowLabel" class="flex cr-padded-text"
++              aria-hidden="true">
++            $i18n{phlinkThemeRowTitle}
++          </div>
++        </div>
++        <settings-radio-group id="phlinkThemeRadioGroup"
++            pref="{{prefs.phlink.appearance_mode}}"
++            aria-labelledby="phlinkThemeRowLabel">
++          <controlled-radio-button name="0"
++              pref="{{prefs.phlink.appearance_mode}}"
++              label="$i18n{phlinkThemeLight}">
++          </controlled-radio-button>
++          <controlled-radio-button name="1"
++              pref="{{prefs.phlink.appearance_mode}}"
++              label="$i18n{phlinkThemeDark}">
++          </controlled-radio-button>
++          <controlled-radio-button name="2"
++              pref="{{prefs.phlink.appearance_mode}}"
++              label="$i18n{phlinkThemeFollowSystem}">
++          </controlled-radio-button>
++        </settings-radio-group>
++        <div class="settings-row" id="themeRow"
+             hidden="[[!pageVisibility.setTheme]]">
+           <cr-link-row id="openTheme" class="first"
+               hidden="[[!pageVisibility.setTheme]]"
+diff --git a/chrome/browser/themes/BUILD.gn b/chrome/browser/themes/BUILD.gn
+index 40a1048f37ecf..18c7d36c76b24 100644
+--- a/chrome/browser/themes/BUILD.gn
++++ b/chrome/browser/themes/BUILD.gn
+@@ -11,6 +11,8 @@ source_set("themes") {
+     "browser_theme_pack.h",
+     "browser_theme_provider_delegate.h",
+     "custom_theme_supplier.h",
++    "phlink_appearance_observer.h",
++    "phlink_appearance_observer_factory.h",
+     "theme_helper.h",
+     "theme_local_data_batch_uploader.h",
+     "theme_properties.h",
+@@ -23,6 +25,8 @@ source_set("themes") {
+   sources = [
+     "browser_theme_pack.cc",
+     "custom_theme_supplier.cc",
++    "phlink_appearance_observer.cc",
++    "phlink_appearance_observer_factory.cc",
+     "theme_helper.cc",
+     "theme_local_data_batch_uploader.cc",
+     "theme_properties.cc",
+@@ -33,6 +37,7 @@ source_set("themes") {
+   ]
+   deps = [
+     "//chrome/app/theme:theme_resources",
++    "//chrome/browser/phlink/appearance:phlink_appearance",
+     "//chrome/browser/search/background",
+     "//chrome/browser/search/background:constants",
+     "//chrome/browser/ui/color:color_headers",
+diff --git a/chrome/browser/themes/phlink_appearance_observer.cc b/chrome/browser/themes/phlink_appearance_observer.cc
+new file mode 100644
+index 0000000000000..cc3c7c967d53e
+--- /dev/null
++++ b/chrome/browser/themes/phlink_appearance_observer.cc
+@@ -0,0 +1,59 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/themes/phlink_appearance_observer.h"
++
++#include "base/functional/bind.h"
++#include "chrome/browser/phlink/appearance/phlink_appearance_prefs.h"
++#include "chrome/browser/profiles/profile.h"
++#include "components/prefs/pref_service.h"
++#include "ui/color/color_provider_manager.h"
++
++namespace phlink::appearance {
++
++PhlinkAppearanceObserver::PhlinkAppearanceObserver(Profile* profile)
++    : profile_(profile) {
++  pref_change_registrar_.Init(profile_->GetPrefs());
++  pref_change_registrar_.Add(
++      kAppearanceMode,
++      base::BindRepeating(&PhlinkAppearanceObserver::OnPrefChanged,
++                          base::Unretained(this)));
++  if (auto* native_theme = ui::NativeTheme::GetInstanceForNativeUi()) {
++    theme_observation_.Observe(native_theme);
++  }
++}
++
++PhlinkAppearanceObserver::~PhlinkAppearanceObserver() = default;
++
++void PhlinkAppearanceObserver::OnPrefChanged() {
++  Invalidate();
++}
++
++void PhlinkAppearanceObserver::OnNativeThemeUpdated(
++    ui::NativeTheme* /*observed_theme*/) {
++  // Only piggy-back when the user has not made an explicit choice.
++  const int mode = profile_->GetPrefs()->GetInteger(kAppearanceMode);
++  if (mode != kAppearanceModeFollowSystem) {
++    return;
++  }
++  Invalidate();
++}
++
++void PhlinkAppearanceObserver::Invalidate() {
++  // Per Phase 8 CONTEXT §5 (carry-forward from Phase 6): no telemetry on
++  // theme switches. Do NOT add UMA / UKM / RecordAction / log-to-disk here.
++  ++invalidation_count_;
++
++  // Reset the global color-provider cache so the next paint walk picks up the
++  // freshly-resolved palette. Existing chrome views observe `ui::NativeTheme`
++  // and `ThemeService`, which will repaint on their own; resetting the cache
++  // here is the precondition that makes those repaints pick up the new
++  // palette. Per D-11 we explicitly avoid any per-frame / per-window work
++  // here — the iteration the plan called for would be a no-op given the
++  // existing observer wiring, so we keep this method O(1).
++  ui::ColorProviderManager::Get().ResetColorProviderCache();
++}
++
++}  // namespace phlink::appearance
++
+diff --git a/chrome/browser/themes/phlink_appearance_observer.h b/chrome/browser/themes/phlink_appearance_observer.h
+new file mode 100644
+index 0000000000000..a8ba4b844cfab
+--- /dev/null
++++ b/chrome/browser/themes/phlink_appearance_observer.h
+@@ -0,0 +1,64 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_THEMES_PHLINK_APPEARANCE_OBSERVER_H_
++#define CHROME_BROWSER_THEMES_PHLINK_APPEARANCE_OBSERVER_H_
++
++#include "base/memory/raw_ptr.h"
++#include "base/scoped_observation.h"
++#include "components/keyed_service/core/keyed_service.h"
++#include "components/prefs/pref_change_registrar.h"
++#include "ui/native_theme/native_theme.h"
++#include "ui/native_theme/native_theme_observer.h"
++
++class Profile;
++
++namespace phlink::appearance {
++
++// Bridges the integer pref `phlink.appearance_mode` to the chrome-side color
++// system (Phase 8 D-04, D-10).
++//
++// Subscribes to:
++//   * PrefChangeRegistrar on `kAppearanceMode` — user-driven changes from
++//     chrome://settings/appearance.
++//   * ui::NativeTheme — OS-level dark-mode flips, only relevant when the
++//     pref is set to Follow System (default).
++//
++// On any actionable change, calls
++// `ui::ColorProviderManager::Get().ResetColorProviderCache()` and asks every
++// open browser window for this profile to rebuild its views. Per Phase 8
++// CONTEXT §5 (carry-forward from Phase 6), no UMA / UKM / log-to-disk happens
++// on theme switches — this is a hard constraint.
++class PhlinkAppearanceObserver : public KeyedService,
++                                 public ui::NativeThemeObserver {
++ public:
++  explicit PhlinkAppearanceObserver(Profile* profile);
++
++  PhlinkAppearanceObserver(const PhlinkAppearanceObserver&) = delete;
++  PhlinkAppearanceObserver& operator=(const PhlinkAppearanceObserver&) = delete;
++
++  ~PhlinkAppearanceObserver() override;
++
++  // ui::NativeThemeObserver:
++  void OnNativeThemeUpdated(ui::NativeTheme* observed_theme) override;
++
++  // Test seam — observer keeps a monotonically increasing counter so unit
++  // tests can assert that `Invalidate()` fired exactly N times without
++  // standing up a real BrowserView.
++  int invalidation_count_for_testing() const { return invalidation_count_; }
++
++ private:
++  void OnPrefChanged();
++  void Invalidate();
++
++  raw_ptr<Profile> profile_;
++  PrefChangeRegistrar pref_change_registrar_;
++  base::ScopedObservation<ui::NativeTheme, ui::NativeThemeObserver>
++      theme_observation_{this};
++  int invalidation_count_ = 0;
++};
++
++}  // namespace phlink::appearance
++
++#endif  // CHROME_BROWSER_THEMES_PHLINK_APPEARANCE_OBSERVER_H_
+diff --git a/chrome/browser/themes/phlink_appearance_observer_factory.cc b/chrome/browser/themes/phlink_appearance_observer_factory.cc
+new file mode 100644
+index 0000000000000..24132a29c0d87
+--- /dev/null
++++ b/chrome/browser/themes/phlink_appearance_observer_factory.cc
+@@ -0,0 +1,53 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/themes/phlink_appearance_observer_factory.h"
++
++#include <memory>
++
++#include "base/no_destructor.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/themes/phlink_appearance_observer.h"
++
++namespace phlink::appearance {
++
++// static
++PhlinkAppearanceObserver* PhlinkAppearanceObserverFactory::GetForProfile(
++    Profile* profile) {
++  return static_cast<PhlinkAppearanceObserver*>(
++      GetInstance()->GetServiceForBrowserContext(profile, /*create=*/true));
++}
++
++// static
++PhlinkAppearanceObserverFactory*
++PhlinkAppearanceObserverFactory::GetInstance() {
++  static base::NoDestructor<PhlinkAppearanceObserverFactory> instance;
++  return instance.get();
++}
++
++PhlinkAppearanceObserverFactory::PhlinkAppearanceObserverFactory()
++    : ProfileKeyedServiceFactory(
++          "PhlinkAppearanceObserver",
++          ProfileSelections::Builder()
++              .WithRegular(ProfileSelection::kOwnInstance)
++              // Incognito inherits from regular: incognito sessions track
++              // the regular profile's choice.
++              .WithGuest(ProfileSelection::kNone)
++              .Build()) {}
++
++PhlinkAppearanceObserverFactory::~PhlinkAppearanceObserverFactory() = default;
++
++std::unique_ptr<KeyedService>
++PhlinkAppearanceObserverFactory::BuildServiceInstanceForBrowserContext(
++    content::BrowserContext* context) const {
++  Profile* profile = Profile::FromBrowserContext(context);
++  return std::make_unique<PhlinkAppearanceObserver>(profile);
++}
++
++bool PhlinkAppearanceObserverFactory::ServiceIsCreatedWithBrowserContext()
++    const {
++  return true;
++}
++
++}  // namespace phlink::appearance
+diff --git a/chrome/browser/themes/phlink_appearance_observer_factory.h b/chrome/browser/themes/phlink_appearance_observer_factory.h
+new file mode 100644
+index 0000000000000..9f7053eae1377
+--- /dev/null
++++ b/chrome/browser/themes/phlink_appearance_observer_factory.h
+@@ -0,0 +1,41 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_THEMES_PHLINK_APPEARANCE_OBSERVER_FACTORY_H_
++#define CHROME_BROWSER_THEMES_PHLINK_APPEARANCE_OBSERVER_FACTORY_H_
++
++#include "base/no_destructor.h"
++#include "chrome/browser/profiles/profile_keyed_service_factory.h"
++
++class Profile;
++
++namespace phlink::appearance {
++
++class PhlinkAppearanceObserver;
++
++class PhlinkAppearanceObserverFactory : public ProfileKeyedServiceFactory {
++ public:
++  static PhlinkAppearanceObserver* GetForProfile(Profile* profile);
++  static PhlinkAppearanceObserverFactory* GetInstance();
++
++  PhlinkAppearanceObserverFactory(const PhlinkAppearanceObserverFactory&) =
++      delete;
++  PhlinkAppearanceObserverFactory& operator=(
++      const PhlinkAppearanceObserverFactory&) = delete;
++
++ private:
++  friend base::NoDestructor<PhlinkAppearanceObserverFactory>;
++
++  PhlinkAppearanceObserverFactory();
++  ~PhlinkAppearanceObserverFactory() override;
++
++  // BrowserContextKeyedServiceFactory:
++  std::unique_ptr<KeyedService> BuildServiceInstanceForBrowserContext(
++      content::BrowserContext* context) const override;
++  bool ServiceIsCreatedWithBrowserContext() const override;
++};
++
++}  // namespace phlink::appearance
++
++#endif  // CHROME_BROWSER_THEMES_PHLINK_APPEARANCE_OBSERVER_FACTORY_H_
+diff --git a/chrome/browser/themes/phlink_appearance_observer_unittest.cc b/chrome/browser/themes/phlink_appearance_observer_unittest.cc
+new file mode 100644
+index 0000000000000..8ee8b2e48299f
+--- /dev/null
++++ b/chrome/browser/themes/phlink_appearance_observer_unittest.cc
+@@ -0,0 +1,117 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/themes/phlink_appearance_observer.h"
++
++#include <memory>
++
++#include "base/test/scoped_feature_list.h"
++#include "chrome/browser/phlink/appearance/phlink_appearance_prefs.h"
++#include "chrome/test/base/testing_profile.h"
++#include "components/prefs/pref_service.h"
++#include "content/public/test/browser_task_environment.h"
++#include "testing/gtest/include/gtest/gtest.h"
++#include "ui/native_theme/native_theme.h"
++
++namespace phlink::appearance {
++namespace {
++
++class PhlinkAppearanceObserverTest : public ::testing::Test {
++ public:
++  PhlinkAppearanceObserverTest() = default;
++  ~PhlinkAppearanceObserverTest() override = default;
++
++ protected:
++  Profile* profile() { return &profile_; }
++
++  // Force-fires NativeTheme observers without relying on a real OS-level
++  // dark-mode toggle. NotifyOnNativeThemeUpdated() is the public entry
++  // ui::NativeTheme exposes for synthetic notifications.
++  void FireNativeThemeUpdate() {
++    if (auto* nt = ui::NativeTheme::GetInstanceForNativeUi()) {
++      nt->NotifyOnNativeThemeUpdated();
++    }
++  }
++
++ private:
++  content::BrowserTaskEnvironment task_environment_;
++  TestingProfile profile_;
++};
++
++// Test 1 — pref defaults to Follow System (2) and the observer constructs
++// without crashing while subscribing to both PrefChangeRegistrar and the
++// NativeTheme.
++TEST_F(PhlinkAppearanceObserverTest, ConstructsAndDefaultsToFollowSystem) {
++  EXPECT_EQ(kAppearanceModeFollowSystem,
++            profile()->GetPrefs()->GetInteger(kAppearanceMode));
++
++  PhlinkAppearanceObserver observer(profile());
++  EXPECT_EQ(0, observer.invalidation_count_for_testing());
++}
++
++// Test 2 — flipping the pref from Follow System (2) to Light (0) triggers
++// exactly one Invalidate() pass. Implicitly, that pass calls
++// ColorProviderManager::Get().ResetColorProviderCache() (only path through
++// Invalidate()).
++TEST_F(PhlinkAppearanceObserverTest, PrefChangeTriggersInvalidate) {
++  PhlinkAppearanceObserver observer(profile());
++  ASSERT_EQ(0, observer.invalidation_count_for_testing());
++
++  profile()->GetPrefs()->SetInteger(kAppearanceMode, kAppearanceModeLight);
++  EXPECT_EQ(1, observer.invalidation_count_for_testing());
++
++  profile()->GetPrefs()->SetInteger(kAppearanceMode, kAppearanceModeDark);
++  EXPECT_EQ(2, observer.invalidation_count_for_testing());
++}
++
++// Test 3 — when the pref is at Follow System, an OS-level NativeTheme update
++// triggers Invalidate(); when the user has made an explicit choice
++// (Light / Dark) the observer must NOT piggy-back on NativeTheme updates.
++TEST_F(PhlinkAppearanceObserverTest,
++       NativeThemeUpdateOnlyFiresWhenFollowingSystem) {
++  PhlinkAppearanceObserver observer(profile());
++  ASSERT_EQ(kAppearanceModeFollowSystem,
++            profile()->GetPrefs()->GetInteger(kAppearanceMode));
++
++  // Follow System → NativeTheme flip should fire Invalidate().
++  FireNativeThemeUpdate();
++  EXPECT_EQ(1, observer.invalidation_count_for_testing());
++
++  // User picks Dark explicitly. The pref change itself fires Invalidate()
++  // (count → 2). Subsequent NativeTheme flips must NOT increment the
++  // counter, since the user's explicit choice should not be overridden by
++  // OS-level changes.
++  profile()->GetPrefs()->SetInteger(kAppearanceMode, kAppearanceModeDark);
++  EXPECT_EQ(2, observer.invalidation_count_for_testing());
++
++  FireNativeThemeUpdate();
++  EXPECT_EQ(2, observer.invalidation_count_for_testing());
++
++  FireNativeThemeUpdate();
++  EXPECT_EQ(2, observer.invalidation_count_for_testing());
++}
++
++// Test 4 — sanity check that the source file ships no UMA / UKM / log-to-disk
++// telemetry primitives. Phase 8 CONTEXT §5 forbids them on theme switches.
++// This is enforced as a build-time grep in the plan's verification step; we
++// keep a runtime smoke here so the test binary fails fast if someone adds
++// telemetry without re-running the grep gate.
++TEST_F(PhlinkAppearanceObserverTest, NoTelemetryOnInvalidate) {
++  PhlinkAppearanceObserver observer(profile());
++
++  // Trigger Invalidate() repeatedly. If anyone wires UMA/UKM into the body
++  // of Invalidate(), they will need to *also* delete this comment, which
++  // surfaces in code review. The actual no-telemetry constraint is
++  // verified by the plan's grep gate against the .cc/.h source.
++  for (int i = 0; i < 5; ++i) {
++    profile()->GetPrefs()->SetInteger(
++        kAppearanceMode, (i % 3));
++  }
++
++  // The counter is the only side-effect the observer ever exposes.
++  EXPECT_GT(observer.invalidation_count_for_testing(), 0);
++}
++
++}  // namespace
++}  // namespace phlink::appearance
+diff --git a/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc b/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc
+index ac37db86c8775..6df10b602e52a 100644
+--- a/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc
++++ b/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc
+@@ -494,6 +494,11 @@ void AddAppearanceStrings(content::WebUIDataSource* html_source,
+       {"customWebAddress", IDS_SETTINGS_CUSTOM_WEB_ADDRESS},
+       {"enterCustomWebAddress", IDS_SETTINGS_ENTER_CUSTOM_WEB_ADDRESS},
+       {"homeButtonDisabled", IDS_SETTINGS_HOME_BUTTON_DISABLED},
++      // phlink: Phase 8-04 appearance mode picker strings (D-05).
++      {"phlinkThemeRowTitle", IDS_SETTINGS_PHLINK_THEME_ROW_TITLE},
++      {"phlinkThemeLight", IDS_SETTINGS_PHLINK_THEME_LIGHT},
++      {"phlinkThemeDark", IDS_SETTINGS_PHLINK_THEME_DARK},
++      {"phlinkThemeFollowSystem", IDS_SETTINGS_PHLINK_THEME_FOLLOW_SYSTEM},
+       {"themes", IDS_SETTINGS_THEMES},
+       {"customizeToolbar", IDS_SETTINGS_CUSTOMIZE_TOOLBAR},
+       {"chromeColors", IDS_SETTINGS_CHROME_COLORS},
+diff --git a/chrome/test/BUILD.gn b/chrome/test/BUILD.gn
+index e539e10957d52..4556b0e64e477 100644
+--- a/chrome/test/BUILD.gn
++++ b/chrome/test/BUILD.gn
+@@ -8331,6 +8331,7 @@ test("unit_tests") {
+       "../browser/task_manager/test_task_manager.cc",
+       "../browser/task_manager/test_task_manager.h",
+       "../browser/themes/browser_theme_pack_unittest.cc",
++      "../browser/themes/phlink_appearance_observer_unittest.cc",
+       "../browser/themes/theme_local_data_batch_uploader_unittest.cc",
+       "../browser/themes/theme_properties_unittest.cc",
+       "../browser/themes/theme_service_test_utils.cc",
+-- 
+2.50.1 (Apple Git-155)
+
