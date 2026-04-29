@@ -60,6 +60,9 @@ jobs:
           print("MANIFEST.schema.json is a valid Draft 2020-12 schema")
           PY
 
+      - name: license-audit (third-party license-compatibility check)
+        run: python scripts/license-audit.py
+
   lint-macos:
     name: lint (macos-14)
     runs-on: macos-14
