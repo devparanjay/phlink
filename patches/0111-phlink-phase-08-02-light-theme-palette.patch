@@ -1,0 +1,111 @@
+From 00e7f6c7fd32322fefd8eb710ab69749371ba5a1 Mon Sep 17 00:00:00 2001
+From: phlink <phlink@local>
+Date: Wed, 29 Apr 2026 18:15:38 +0530
+Subject: [PATCH] phlink: phase 08-02 default Light theme (D-08 locked palette)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Populates kPhlinkLight[] in chrome/browser/ui/color/phlink_palette.cc with
+the eleven LOCKED hex values from CONTEXT D-08 / .planning/sketches/phase-08/
+stitch-output.md §2.1. Adds PhlinkColorMixerLightTest.LockedHex with one
+EXPECT_EQ per token so any drift fails loudly.
+
+Light palette (11 tokens):
+  Canvas      #FFFFFF   Surface     #F8F4EC   SurfaceAlt  #F1EDE5
+  Card        #FFFFFF   Text        #1A1A1A   TextMuted   #525252
+  Hairline    #E5E0D6   Accent      #A8C8E8   OnAccent    #1A1A1A
+  Danger      #C0392B   Success     #2E8540
+
+kPhlinkDark[] left zero-filled (08-03 lands Dark in its own atomic patch).
+WCAG-AA gating deferred to plan 08-05.
+
+Tests: out/Default/unit_tests --gtest_filter='*Phlink*' → 5/5 PASSED
+       (incl. new PhlinkColorMixerLightTest.LockedHex).
+---
+ .../ui/color/phlink_color_mixer_unittests.cc  | 33 +++++++++++++++++++
+ chrome/browser/ui/color/phlink_palette.cc     | 25 +++++++-------
+ 2 files changed, 45 insertions(+), 13 deletions(-)
+
+diff --git a/chrome/browser/ui/color/phlink_color_mixer_unittests.cc b/chrome/browser/ui/color/phlink_color_mixer_unittests.cc
+index a379d8d31821a..24469156328b4 100644
+--- a/chrome/browser/ui/color/phlink_color_mixer_unittests.cc
++++ b/chrome/browser/ui/color/phlink_color_mixer_unittests.cc
+@@ -56,4 +56,37 @@ INSTANTIATE_TEST_SUITE_P(
+     testing::Values(ui::ColorProviderKey::ColorMode::kLight,
+                     ui::ColorProviderKey::ColorMode::kDark));
+ 
++// Phase 08-02: locked Light theme palette per CONTEXT D-08 / stitch-output.md §2.1.
++// Each EXPECT_EQ asserts an exact hex literal; drift triggers gtest failure.
++TEST(PhlinkColorMixerLightTest, LockedHex) {
++  ui::ColorProvider provider;
++  ui::ColorProviderKey key;
++  key.color_mode = ui::ColorProviderKey::ColorMode::kLight;
++  AddPhlinkColorMixer(&provider, key);
++  provider.GenerateColorMapForTesting();
++
++  EXPECT_EQ(provider.GetColor(kColorPhlinkCanvas),
++            SkColorSetRGB(0xFF, 0xFF, 0xFF));
++  EXPECT_EQ(provider.GetColor(kColorPhlinkSurface),
++            SkColorSetRGB(0xF8, 0xF4, 0xEC));
++  EXPECT_EQ(provider.GetColor(kColorPhlinkSurfaceAlt),
++            SkColorSetRGB(0xF1, 0xED, 0xE5));
++  EXPECT_EQ(provider.GetColor(kColorPhlinkCard),
++            SkColorSetRGB(0xFF, 0xFF, 0xFF));
++  EXPECT_EQ(provider.GetColor(kColorPhlinkText),
++            SkColorSetRGB(0x1A, 0x1A, 0x1A));
++  EXPECT_EQ(provider.GetColor(kColorPhlinkTextMuted),
++            SkColorSetRGB(0x52, 0x52, 0x52));
++  EXPECT_EQ(provider.GetColor(kColorPhlinkHairline),
++            SkColorSetRGB(0xE5, 0xE0, 0xD6));
++  EXPECT_EQ(provider.GetColor(kColorPhlinkAccent),
++            SkColorSetRGB(0xA8, 0xC8, 0xE8));
++  EXPECT_EQ(provider.GetColor(kColorPhlinkOnAccent),
++            SkColorSetRGB(0x1A, 0x1A, 0x1A));
++  EXPECT_EQ(provider.GetColor(kColorPhlinkDanger),
++            SkColorSetRGB(0xC0, 0x39, 0x2B));
++  EXPECT_EQ(provider.GetColor(kColorPhlinkSuccess),
++            SkColorSetRGB(0x2E, 0x85, 0x40));
++}
++
+ }  // namespace
+diff --git a/chrome/browser/ui/color/phlink_palette.cc b/chrome/browser/ui/color/phlink_palette.cc
+index b2a574d5f6d75..018274711b532 100644
+--- a/chrome/browser/ui/color/phlink_palette.cc
++++ b/chrome/browser/ui/color/phlink_palette.cc
+@@ -6,20 +6,19 @@
+ 
+ namespace phlink {
+ 
+-// TODO(phlink): filled by patch 0111 (Light) per CONTEXT D-08. Placeholder
+-// opaque-black so the mixer compiles and resolves to non-placeholder colors.
++// Locked by Phase 8 D-08; source: .planning/sketches/phase-08/stitch-output.md §2.1.
+ const SkColor kPhlinkLight[kPhlinkPaletteSize] = {
+-    SkColorSetRGB(0x00, 0x00, 0x00),  // kCanvas
+-    SkColorSetRGB(0x00, 0x00, 0x00),  // kSurface
+-    SkColorSetRGB(0x00, 0x00, 0x00),  // kSurfaceAlt
+-    SkColorSetRGB(0x00, 0x00, 0x00),  // kCard
+-    SkColorSetRGB(0x00, 0x00, 0x00),  // kText
+-    SkColorSetRGB(0x00, 0x00, 0x00),  // kTextMuted
+-    SkColorSetRGB(0x00, 0x00, 0x00),  // kHairline
+-    SkColorSetRGB(0x00, 0x00, 0x00),  // kAccent
+-    SkColorSetRGB(0x00, 0x00, 0x00),  // kOnAccent
+-    SkColorSetRGB(0x00, 0x00, 0x00),  // kDanger
+-    SkColorSetRGB(0x00, 0x00, 0x00),  // kSuccess
++    SkColorSetRGB(0xFF, 0xFF, 0xFF),  // [0] kCanvas       — #FFFFFF
++    SkColorSetRGB(0xF8, 0xF4, 0xEC),  // [1] kSurface      — #F8F4EC (warm off-white)
++    SkColorSetRGB(0xF1, 0xED, 0xE5),  // [2] kSurfaceAlt   — #F1EDE5
++    SkColorSetRGB(0xFF, 0xFF, 0xFF),  // [3] kCard         — #FFFFFF
++    SkColorSetRGB(0x1A, 0x1A, 0x1A),  // [4] kText         — #1A1A1A
++    SkColorSetRGB(0x52, 0x52, 0x52),  // [5] kTextMuted    — #525252
++    SkColorSetRGB(0xE5, 0xE0, 0xD6),  // [6] kHairline     — #E5E0D6
++    SkColorSetRGB(0xA8, 0xC8, 0xE8),  // [7] kAccent       — #A8C8E8 (Pastel Sky Blue)
++    SkColorSetRGB(0x1A, 0x1A, 0x1A),  // [8] kOnAccent     — #1A1A1A (11.4:1 contrast)
++    SkColorSetRGB(0xC0, 0x39, 0x2B),  // [9] kDanger       — #C0392B
++    SkColorSetRGB(0x2E, 0x85, 0x40),  // [10] kSuccess     — #2E8540
+ };
+ 
+ // TODO(phlink): filled by patch 0112 (Dark) per CONTEXT D-08.
+-- 
+2.50.1 (Apple Git-155)
+
