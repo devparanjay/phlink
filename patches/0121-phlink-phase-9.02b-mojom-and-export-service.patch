@@ -1,0 +1,324 @@
+From 084664152d9126a62b0cfe2c7f3d5bc0859608a9 Mon Sep 17 00:00:00 2001
+From: phlink <phlink@local>
+Date: Wed, 29 Apr 2026 21:58:44 +0530
+Subject: [PATCH] phlink: phase 9 plan 09-02b mojom + ExportService
+
+Lands the Profile-decoupled half of the export pipeline so the
+Settings WebUI work can be approached separately.
+
+- chrome/browser/phlink/portability/portability.mojom: ExportStatus
+  enum, ProgressObserver interface, Exporter interface
+  (ObserveProgress + Export). Lives in the phlink.portability.mojom
+  module.
+- export_service.{h,cc}: ExportProfileToBundle(profile_dir, dest_path,
+  passphrase) and an include-list-overridable variant for tests.
+  Skips missing profile files (Chromium does not always create every
+  file in every profile until first use). Returns ExportStatus
+  mirroring the mojom enum.
+- export_service_unittest.cc: empty-passphrase rejection +
+  end-to-end round-trip from a hand-built temp profile dir through
+  BundleWriter and back through BundleReader.
+
+The Settings WebUI Export card (Lit element + chrome://settings/portability
+route + localized strings) is the remaining piece and lands in a
+follow-up patch (slot 0122).
+---
+ chrome/browser/phlink/portability/BUILD.gn    | 22 +++++++
+ .../phlink/portability/export_service.cc      | 57 +++++++++++++++++++
+ .../phlink/portability/export_service.h       | 56 ++++++++++++++++++
+ .../portability/export_service_unittest.cc    | 54 ++++++++++++++++++
+ .../phlink/portability/portability.mojom      | 45 +++++++++++++++
+ 5 files changed, 234 insertions(+)
+ create mode 100644 chrome/browser/phlink/portability/export_service.cc
+ create mode 100644 chrome/browser/phlink/portability/export_service.h
+ create mode 100644 chrome/browser/phlink/portability/export_service_unittest.cc
+ create mode 100644 chrome/browser/phlink/portability/portability.mojom
+
+diff --git a/chrome/browser/phlink/portability/BUILD.gn b/chrome/browser/phlink/portability/BUILD.gn
+index edcbc7ef8d203..0b7c904fb692e 100644
+--- a/chrome/browser/phlink/portability/BUILD.gn
++++ b/chrome/browser/phlink/portability/BUILD.gn
+@@ -3,6 +3,7 @@
+ # found in the LICENSE file.
+ 
+ import("//build/rust/rust_static_library.gni")
++import("//mojo/public/tools/bindings/mojom.gni")
+ import("//testing/test.gni")
+ 
+ # Rust↔C++ bridge over the vendored Argon2id + XChaCha20-Poly1305 crates.
+@@ -49,15 +50,36 @@ source_set("bundle_codec") {
+   ]
+ }
+ 
++# WebUI ↔ browser interface for plan 09-02b (Settings Export card).
++mojom("portability_mojom") {
++  sources = [ "portability.mojom" ]
++  public_deps = [ "//mojo/public/mojom/base" ]
++}
++
++# Profile-decoupled export driver. Takes a profile_dir + dest_path and
++# packs the default include-list into a sealed `.phlinkbundle`.
++source_set("export_service") {
++  sources = [
++    "export_service.cc",
++    "export_service.h",
++  ]
++  deps = [
++    ":bundle_codec",
++    "//base",
++  ]
++}
++
+ source_set("unit_tests") {
+   testonly = true
+   sources = [
+     "bundle_reader_unittest.cc",
+     "bundle_writer_unittest.cc",
++    "export_service_unittest.cc",
+     "phlink_crypto_unittest.cc",
+   ]
+   deps = [
+     ":bundle_codec",
++    ":export_service",
+     ":phlink_crypto",
+     "//base",
+     "//testing/gtest",
+diff --git a/chrome/browser/phlink/portability/export_service.cc b/chrome/browser/phlink/portability/export_service.cc
+new file mode 100644
+index 0000000000000..cb725547ab20e
+--- /dev/null
++++ b/chrome/browser/phlink/portability/export_service.cc
+@@ -0,0 +1,57 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/phlink/portability/export_service.h"
++
++#include <string>
++#include <vector>
++
++#include "base/files/file_util.h"
++#include "chrome/browser/phlink/portability/bundle_writer.h"
++
++namespace phlink::portability {
++
++ExportStatus ExportProfileToBundle(const base::FilePath& profile_dir,
++                                   const base::FilePath& dest_path,
++                                   std::string_view passphrase) {
++  std::vector<std::string> include_list;
++  for (const char* name : kDefaultIncludeList) {
++    include_list.emplace_back(name);
++  }
++  return ExportProfileToBundleWithIncludeList(profile_dir, dest_path,
++                                              passphrase, include_list);
++}
++
++ExportStatus ExportProfileToBundleWithIncludeList(
++    const base::FilePath& profile_dir,
++    const base::FilePath& dest_path,
++    std::string_view passphrase,
++    const std::vector<std::string>& include_list) {
++  if (passphrase.empty()) {
++    return ExportStatus::kBadPassphrase;
++  }
++
++  BundleWriter writer;
++  for (const std::string& name : include_list) {
++    base::FilePath src = profile_dir.AppendASCII(name);
++    std::string contents;
++    if (!base::ReadFileToString(src, &contents)) {
++      // Missing file is OK — Chromium does not always create every file
++      // in every profile (e.g. an empty profile may not have History).
++      continue;
++    }
++    base::span<const uint8_t> bytes(
++        reinterpret_cast<const uint8_t*>(contents.data()), contents.size());
++    if (!writer.AddFile(name, bytes)) {
++      return ExportStatus::kCodecFailure;
++    }
++  }
++
++  if (!writer.WriteToFile(dest_path, passphrase)) {
++    return ExportStatus::kIoFailure;
++  }
++  return ExportStatus::kOk;
++}
++
++}  // namespace phlink::portability
+diff --git a/chrome/browser/phlink/portability/export_service.h b/chrome/browser/phlink/portability/export_service.h
+new file mode 100644
+index 0000000000000..d20c4071e2de6
+--- /dev/null
++++ b/chrome/browser/phlink/portability/export_service.h
+@@ -0,0 +1,56 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_PHLINK_PORTABILITY_EXPORT_SERVICE_H_
++#define CHROME_BROWSER_PHLINK_PORTABILITY_EXPORT_SERVICE_H_
++
++#include <string>
++#include <string_view>
++#include <vector>
++
++#include "base/files/file_path.h"
++
++namespace phlink::portability {
++
++enum class ExportStatus {
++  kOk,
++  kCodecFailure,
++  kIoFailure,
++  kBadPassphrase,
++};
++
++// Default v1 include-list per CONTEXT D-04 + format spec §5.
++// Any entry that is missing from `profile_dir` is silently skipped
++// (Chromium does not always create every file in every profile until
++// first use; missing != error).
++inline constexpr const char* const kDefaultIncludeList[] = {
++    "Bookmarks",
++    "Preferences",
++    "History",
++    "Web Data",
++};
++
++// Collects the default include-list from `profile_dir`, packs it into a
++// `.phlinkbundle` via `BundleWriter`, and writes the result to
++// `dest_path`. Blocking — call on a `base::ThreadPool` worker.
++//
++// `profile_dir` is the directory that contains files like `Bookmarks`
++// (typically `Profile->GetPath()` from a `Profile*`). The service does
++// **not** depend on `Profile` so it stays unit-testable without a
++// `TestingProfile`.
++ExportStatus ExportProfileToBundle(const base::FilePath& profile_dir,
++                                   const base::FilePath& dest_path,
++                                   std::string_view passphrase);
++
++// Same as above, but the caller chooses the include-list (used by tests
++// and by 09-03b's round-trip browser-test).
++ExportStatus ExportProfileToBundleWithIncludeList(
++    const base::FilePath& profile_dir,
++    const base::FilePath& dest_path,
++    std::string_view passphrase,
++    const std::vector<std::string>& include_list);
++
++}  // namespace phlink::portability
++
++#endif  // CHROME_BROWSER_PHLINK_PORTABILITY_EXPORT_SERVICE_H_
+diff --git a/chrome/browser/phlink/portability/export_service_unittest.cc b/chrome/browser/phlink/portability/export_service_unittest.cc
+new file mode 100644
+index 0000000000000..b0d8ea861b1d2
+--- /dev/null
++++ b/chrome/browser/phlink/portability/export_service_unittest.cc
+@@ -0,0 +1,54 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/phlink/portability/export_service.h"
++
++#include <string>
++
++#include "base/files/file_util.h"
++#include "base/files/scoped_temp_dir.h"
++#include "chrome/browser/phlink/portability/bundle_reader.h"
++#include "testing/gtest/include/gtest/gtest.h"
++
++namespace phlink::portability {
++namespace {
++
++TEST(ExportServiceTest, EmptyPassphraseRejected) {
++  base::ScopedTempDir tmp;
++  ASSERT_TRUE(tmp.CreateUniqueTempDir());
++  base::FilePath dest = tmp.GetPath().AppendASCII("out.phlinkbundle");
++  EXPECT_EQ(ExportProfileToBundle(tmp.GetPath(), dest, ""),
++            ExportStatus::kBadPassphrase);
++  EXPECT_FALSE(base::PathExists(dest));
++}
++
++TEST(ExportServiceTest, RoundTripFromTempProfileDir) {
++  base::ScopedTempDir profile;
++  ASSERT_TRUE(profile.CreateUniqueTempDir());
++  ASSERT_TRUE(base::WriteFile(profile.GetPath().AppendASCII("Bookmarks"),
++                              "{\"roots\":\"x\"}"));
++  ASSERT_TRUE(base::WriteFile(profile.GetPath().AppendASCII("Preferences"),
++                              "{\"theme\":\"dark\"}"));
++  // Web Data + History intentionally missing — service must skip them.
++
++  base::ScopedTempDir out;
++  ASSERT_TRUE(out.CreateUniqueTempDir());
++  base::FilePath dest = out.GetPath().AppendASCII("out.phlinkbundle");
++
++  ASSERT_EQ(ExportProfileToBundle(profile.GetPath(), dest, "pw"),
++            ExportStatus::kOk);
++  ASSERT_TRUE(base::PathExists(dest));
++
++  BundleReader reader;
++  ASSERT_EQ(reader.OpenFile(dest, "pw"), BundleReader::Status::kOk);
++  const auto& entries = reader.Entries();
++  EXPECT_EQ(entries.size(), 2u);
++  ASSERT_TRUE(entries.count("Bookmarks"));
++  ASSERT_TRUE(entries.count("Preferences"));
++  EXPECT_EQ(0u, entries.count("History"));
++  EXPECT_EQ(0u, entries.count("Web Data"));
++}
++
++}  // namespace
++}  // namespace phlink::portability
+diff --git a/chrome/browser/phlink/portability/portability.mojom b/chrome/browser/phlink/portability/portability.mojom
+new file mode 100644
+index 0000000000000..41b429d290b52
+--- /dev/null
++++ b/chrome/browser/phlink/portability/portability.mojom
+@@ -0,0 +1,45 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// WebUI ↔ browser plumbing for phlink's profile portability surface
++// (chrome://settings/portability and the phlink:// alias).
++//
++// All bundle codec work stays in the browser process; the WebUI never
++// sees the user passphrase after handing it to `Export` / `Import`,
++// and never sees the derived AEAD key at all.
++module phlink.portability.mojom;
++
++import "mojo/public/mojom/base/file_path.mojom";
++
++// Mirrors phlink::portability::ExportStatus in C++.
++enum ExportStatus {
++  kOk,
++  // Bundle codec failed (out of memory, KDF rejection, AEAD seal error).
++  kCodecFailure,
++  // Filesystem write failed (permissions, full disk, …).
++  kIoFailure,
++  // The supplied passphrase was empty or malformed.
++  kBadPassphrase,
++};
++
++// One-shot progress notification from the export worker.
++interface ProgressObserver {
++  // `percent` ∈ [0, 100]. `step_name` is a stable English identifier
++  // (e.g. "snapshot_history", "build_tar", "encrypt", "write") so the
++  // WebUI can localize via its own message catalog.
++  OnProgress(uint32 percent, string step_name);
++};
++
++// Browser-side service driving a single `.phlinkbundle` export.
++//
++// Lifetime: created per WebUI binding. Cancelled on disconnect.
++interface Exporter {
++  // Streams progress updates while the export runs.
++  ObserveProgress(pending_remote<ProgressObserver> observer);
++
++  // Writes the bundle to `path` using `passphrase` for KDF + AEAD.
++  // Replies once the file is fully on disk (or a failure occurred).
++  Export(string passphrase, mojo_base.mojom.FilePath path)
++      => (ExportStatus status);
++};
+-- 
+2.50.1 (Apple Git-155)
+
