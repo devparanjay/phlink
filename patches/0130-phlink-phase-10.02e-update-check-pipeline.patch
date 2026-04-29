@@ -1,0 +1,523 @@
+From fa00772bc31939d4a15a3c51e83c326c3c2907cd Mon Sep 17 00:00:00 2001
+From: phlink <dev@phlink.local>
+Date: Thu, 30 Apr 2026 00:42:06 +0530
+Subject: [PATCH] phlink: phase 10.02e UpdateCheckPipeline (orchestrator)
+
+Adds phlink::updater::UpdateCheckPipeline: a one-shot orchestrator that
+runs a full update-check round end-to-end:
+
+  1. Parse + verify the trust-pinned root.json with TufClient.
+  2. Drive MetadataFetcher (timestamp -> snapshot -> targets).
+  3. Look up the target for the running platform/arch/version.
+  4. Drive PayloadFetcher (download + length + sha256 verify).
+  5. Write staged.json so the platform helper (10-03/04/05) can
+     pick the payload up at next launch.
+
+Outcomes: kOk, kUpToDate, kMetadataError, kTargetMissing,
+kPayloadError, kIoError.
+
+This is the production CheckCallback that will be bound into
+UpdaterService once a settings WebUI handler asks for it (deferred to
+plan 10-06; we don't want to touch chrome_browser_main_extra_parts_*
+for a lazy-built KeyedService that nothing user-visible references
+yet).
+
+Also extends metadata_test_helpers with BuildTargetsSignedWithEntry()
+so tests can pin a specific target name + length + sha256.
+
+26/26 phlink_updater_unittests pass (4 new pipeline tests).
+Refs phlink phase 10-02e.
+---
+ chrome/browser/phlink/updater/BUILD.gn        |  22 +++
+ .../phlink/updater/metadata_test_helpers.cc   |  16 +-
+ .../phlink/updater/metadata_test_helpers.h    |   9 +
+ .../phlink/updater/update_check_pipeline.cc   | 104 +++++++++++
+ .../phlink/updater/update_check_pipeline.h    |  96 +++++++++++
+ .../updater/update_check_pipeline_unittest.cc | 163 ++++++++++++++++++
+ 6 files changed, 407 insertions(+), 3 deletions(-)
+ create mode 100644 chrome/browser/phlink/updater/update_check_pipeline.cc
+ create mode 100644 chrome/browser/phlink/updater/update_check_pipeline.h
+ create mode 100644 chrome/browser/phlink/updater/update_check_pipeline_unittest.cc
+
+diff --git a/chrome/browser/phlink/updater/BUILD.gn b/chrome/browser/phlink/updater/BUILD.gn
+index ad6ce6f79899b..d20b44a41a10d 100644
+--- a/chrome/browser/phlink/updater/BUILD.gn
++++ b/chrome/browser/phlink/updater/BUILD.gn
+@@ -112,6 +112,26 @@ source_set("staged_payload") {
+   deps = [ "//base" ]
+ }
+ 
++# UpdateCheckPipeline: orchestrates one full update-check round
++# (metadata fetch -> target lookup -> payload fetch -> staged.json
++# write). This is the production CheckCallback for UpdaterService;
++# tests inject a fake CheckCallback directly.
++source_set("update_check_pipeline") {
++  sources = [
++    "update_check_pipeline.cc",
++    "update_check_pipeline.h",
++  ]
++  deps = [
++    ":fetcher",
++    ":metadata",
++    ":payload_fetcher",
++    ":staged_payload",
++    "//base",
++    "//services/network/public/cpp",
++    "//url",
++  ]
++}
++
+ # Shared metadata-builder helpers used by metadata_client_unittest
+ # and metadata_fetcher_unittest. Builds Ed25519-signed root /
+ # timestamp / snapshot / targets envelopes inline so tests don't
+@@ -147,6 +167,7 @@ source_set("unit_tests") {
+     "metadata_fetcher_unittest.cc",
+     "payload_fetcher_unittest.cc",
+     "staged_payload_unittest.cc",
++    "update_check_pipeline_unittest.cc",
+     "update_check_scheduler_unittest.cc",
+     "updater_service_unittest.cc",
+   ]
+@@ -159,6 +180,7 @@ source_set("unit_tests") {
+     ":service",
+     ":staged_payload",
+     ":test_helpers",
++    ":update_check_pipeline",
+     "//base",
+     "//base/test:test_support",
+     "//components/prefs",
+diff --git a/chrome/browser/phlink/updater/metadata_test_helpers.cc b/chrome/browser/phlink/updater/metadata_test_helpers.cc
+index 4821137359075..6d11363384825 100644
+--- a/chrome/browser/phlink/updater/metadata_test_helpers.cc
++++ b/chrome/browser/phlink/updater/metadata_test_helpers.cc
+@@ -159,13 +159,23 @@ base::DictValue BuildTargetsSigned(int version, const std::string& expires) {
+   for (size_t i = 0; i < fake_sha.size(); ++i) {
+     fake_sha[i] = static_cast<uint8_t>(i);
+   }
++  return BuildTargetsSignedWithEntry(version, expires,
++                                     "phlink-1.0.0-mac-arm64.zip",
++                                     /*length=*/1024, fake_sha);
++}
++
++base::DictValue BuildTargetsSignedWithEntry(int version,
++                                            const std::string& expires,
++                                            const std::string& name,
++                                            uint64_t length,
++                                            std::array<uint8_t, 32> sha256) {
+   base::DictValue hashes;
+-  hashes.Set("sha256", ToHex(fake_sha));
++  hashes.Set("sha256", ToHex(sha256));
+   base::DictValue tgt;
+-  tgt.Set("length", 1024);
++  tgt.Set("length", static_cast<int>(length));
+   tgt.Set("hashes", std::move(hashes));
+   base::DictValue targets;
+-  targets.Set("phlink-1.0.0-mac-arm64.zip", std::move(tgt));
++  targets.Set(name, std::move(tgt));
+   base::DictValue s;
+   s.Set("_type", "targets");
+   s.Set("spec_version", "1.0.32");
+diff --git a/chrome/browser/phlink/updater/metadata_test_helpers.h b/chrome/browser/phlink/updater/metadata_test_helpers.h
+index 8aab7e5faf854..8f44a8c0447c4 100644
+--- a/chrome/browser/phlink/updater/metadata_test_helpers.h
++++ b/chrome/browser/phlink/updater/metadata_test_helpers.h
+@@ -52,6 +52,15 @@ base::DictValue BuildSnapshotSigned(int version,
+                                     int targets_version);
+ base::DictValue BuildTargetsSigned(int version, const std::string& expires);
+ 
++// Variant that lets the caller pin one specific target entry (name +
++// length + sha256) instead of the default phlink-1.0.0-mac-arm64.zip
++// fake.
++base::DictValue BuildTargetsSignedWithEntry(int version,
++                                            const std::string& expires,
++                                            const std::string& name,
++                                            uint64_t length,
++                                            std::array<uint8_t, 32> sha256);
++
+ inline base::span<const uint8_t> Bytes(const std::string& s) {
+   return base::as_byte_span(s);
+ }
+diff --git a/chrome/browser/phlink/updater/update_check_pipeline.cc b/chrome/browser/phlink/updater/update_check_pipeline.cc
+new file mode 100644
+index 0000000000000..ebf601ce5ff37
+--- /dev/null
++++ b/chrome/browser/phlink/updater/update_check_pipeline.cc
+@@ -0,0 +1,104 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/phlink/updater/update_check_pipeline.h"
++
++#include <utility>
++
++#include "base/check.h"
++#include "base/files/file_path.h"
++#include "base/functional/bind.h"
++#include "base/time/time.h"
++#include "chrome/browser/phlink/updater/metadata_fetcher.h"
++#include "chrome/browser/phlink/updater/payload_fetcher.h"
++#include "chrome/browser/phlink/updater/staged_payload.h"
++#include "services/network/public/cpp/shared_url_loader_factory.h"
++
++namespace phlink::updater {
++
++UpdateCheckPipeline::Config::Config() = default;
++UpdateCheckPipeline::Config::Config(Config&&) = default;
++UpdateCheckPipeline::Config& UpdateCheckPipeline::Config::operator=(Config&&) =
++    default;
++UpdateCheckPipeline::Config::~Config() = default;
++
++UpdateCheckPipeline::UpdateCheckPipeline(
++    scoped_refptr<network::SharedURLLoaderFactory> factory,
++    Config config)
++    : factory_(std::move(factory)), config_(std::move(config)) {
++  CHECK(factory_);
++  CHECK(config_.metadata_base_url.is_valid());
++  CHECK(config_.payload_base_url.is_valid());
++  CHECK(!config_.target_name.empty());
++  CHECK(!config_.staging_dir.empty());
++}
++
++UpdateCheckPipeline::~UpdateCheckPipeline() = default;
++
++void UpdateCheckPipeline::Run(ResultCallback callback) {
++  CHECK(!callback_) << "UpdateCheckPipeline is one-shot";
++  callback_ = std::move(callback);
++
++  auto client_or =
++      TufClient::CreateWithRoot(config_.root_json, base::Time::Now());
++  if (!client_or.has_value()) {
++    Finish(Outcome::kMetadataError);
++    return;
++  }
++  client_ = std::make_unique<TufClient>(std::move(client_or).value());
++
++  metadata_fetcher_ = std::make_unique<MetadataFetcher>(
++      factory_, config_.metadata_base_url);
++  metadata_fetcher_->Fetch(
++      client_.get(),
++      base::BindOnce(&UpdateCheckPipeline::OnMetadataFetched,
++                     weak_factory_.GetWeakPtr()));
++}
++
++void UpdateCheckPipeline::OnMetadataFetched(TufError err) {
++  metadata_fetcher_.reset();
++  if (err != TufError::kOk) {
++    Finish(Outcome::kMetadataError);
++    return;
++  }
++  std::optional<TargetMeta> target =
++      client_->LookupTarget(config_.target_name);
++  if (!target.has_value()) {
++    Finish(Outcome::kTargetMissing);
++    return;
++  }
++
++  GURL payload_url = config_.payload_base_url.Resolve(target->name);
++  payload_fetcher_ =
++      std::make_unique<PayloadFetcher>(factory_, config_.staging_dir);
++  payload_fetcher_->Fetch(
++      std::move(payload_url), target->length, target->sha256,
++      base::BindOnce(&UpdateCheckPipeline::OnPayloadFetched,
++                     weak_factory_.GetWeakPtr()));
++}
++
++void UpdateCheckPipeline::OnPayloadFetched(PayloadFetchResult result) {
++  payload_fetcher_.reset();
++  if (result.error != PayloadFetchError::kOk) {
++    Finish(Outcome::kPayloadError);
++    return;
++  }
++  StagedPayload staged;
++  staged.version = config_.target_version;
++  staged.payload_path = result.payload_path;
++  staged.verified_at = base::Time::Now();
++  if (!WriteStagedPayloadJson(config_.staging_dir, staged)) {
++    Finish(Outcome::kIoError);
++    return;
++  }
++  Finish(Outcome::kOk);
++}
++
++void UpdateCheckPipeline::Finish(Outcome outcome) {
++  if (callback_) {
++    std::move(callback_).Run(outcome);
++  }
++}
++
++}  // namespace phlink::updater
+diff --git a/chrome/browser/phlink/updater/update_check_pipeline.h b/chrome/browser/phlink/updater/update_check_pipeline.h
+new file mode 100644
+index 0000000000000..52546ec0e6471
+--- /dev/null
++++ b/chrome/browser/phlink/updater/update_check_pipeline.h
+@@ -0,0 +1,96 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_PHLINK_UPDATER_UPDATE_CHECK_PIPELINE_H_
++#define CHROME_BROWSER_PHLINK_UPDATER_UPDATE_CHECK_PIPELINE_H_
++
++#include <array>
++#include <cstdint>
++#include <memory>
++#include <string>
++#include <vector>
++
++#include "base/files/file_path.h"
++#include "base/functional/callback.h"
++#include "base/memory/scoped_refptr.h"
++#include "base/memory/weak_ptr.h"
++#include "chrome/browser/phlink/updater/metadata_client.h"
++#include "url/gurl.h"
++
++namespace network {
++class SharedURLLoaderFactory;
++}
++
++namespace phlink::updater {
++
++class MetadataFetcher;
++class PayloadFetcher;
++
++// Orchestrates one full update-check round: fetch+verify TUF metadata,
++// look up the target for the running platform, download+verify the
++// payload, write `staged.json`. Out of scope: applying the update
++// (handled by per-platform helpers in plans 10-03/10-04/10-05).
++//
++// One-shot. Construct, call `Run`, await callback, drop.
++class UpdateCheckPipeline {
++ public:
++  enum class Outcome {
++    kOk,                // staged.json written; update ready for next launch.
++    kUpToDate,          // metadata says no newer version is available.
++    kMetadataError,     // TUF verification or network error during metadata.
++    kTargetMissing,     // `targets.json` doesn't list our platform/arch.
++    kPayloadError,      // payload network/length/hash failure.
++    kIoError,           // staged.json could not be written.
++  };
++  using ResultCallback = base::OnceCallback<void(Outcome)>;
++
++  struct Config {
++    Config();
++    Config(const Config&) = delete;
++    Config(Config&&);
++    Config& operator=(Config&&);
++    ~Config();
++
++    // Trust-pinned root.json bytes (e.g. from `keys/dev_root.json`).
++    std::vector<uint8_t> root_json;
++    // Base URL containing `timestamp.json`, `snapshot.json`, etc.
++    // Must end with '/'.
++    GURL metadata_base_url;
++    // Base URL of the payload artifacts.
++    GURL payload_base_url;
++    // Filename to look for in `targets.json` (e.g.
++    // "phlink-1.2.3-mac-arm64.zip"). Computed by the factory from the
++    // running platform/arch and the running phlink version.
++    std::string target_name;
++    // Version label written into `staged.json`.
++    std::string target_version;
++    // Directory where `payload.zip` and `staged.json` will be written.
++    base::FilePath staging_dir;
++  };
++
++  UpdateCheckPipeline(scoped_refptr<network::SharedURLLoaderFactory> factory,
++                      Config config);
++  UpdateCheckPipeline(const UpdateCheckPipeline&) = delete;
++  UpdateCheckPipeline& operator=(const UpdateCheckPipeline&) = delete;
++  ~UpdateCheckPipeline();
++
++  void Run(ResultCallback callback);
++
++ private:
++  void OnMetadataFetched(TufError err);
++  void OnPayloadFetched(struct PayloadFetchResult result);
++  void Finish(Outcome outcome);
++
++  scoped_refptr<network::SharedURLLoaderFactory> factory_;
++  Config config_;
++  std::unique_ptr<TufClient> client_;
++  std::unique_ptr<MetadataFetcher> metadata_fetcher_;
++  std::unique_ptr<PayloadFetcher> payload_fetcher_;
++  ResultCallback callback_;
++  base::WeakPtrFactory<UpdateCheckPipeline> weak_factory_{this};
++};
++
++}  // namespace phlink::updater
++
++#endif  // CHROME_BROWSER_PHLINK_UPDATER_UPDATE_CHECK_PIPELINE_H_
+diff --git a/chrome/browser/phlink/updater/update_check_pipeline_unittest.cc b/chrome/browser/phlink/updater/update_check_pipeline_unittest.cc
+new file mode 100644
+index 0000000000000..3648682d942df
+--- /dev/null
++++ b/chrome/browser/phlink/updater/update_check_pipeline_unittest.cc
+@@ -0,0 +1,163 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/phlink/updater/update_check_pipeline.h"
++
++#include <array>
++#include <string>
++#include <vector>
++
++#include "base/files/file_util.h"
++#include "base/files/scoped_temp_dir.h"
++#include "base/run_loop.h"
++#include "base/test/bind.h"
++#include "base/test/task_environment.h"
++#include "chrome/browser/phlink/updater/metadata_test_helpers.h"
++#include "chrome/browser/phlink/updater/staged_payload.h"
++#include "crypto/hash.h"
++#include "net/http/http_status_code.h"
++#include "services/network/public/cpp/weak_wrapper_shared_url_loader_factory.h"
++#include "services/network/test/test_url_loader_factory.h"
++#include "testing/gtest/include/gtest/gtest.h"
++#include "url/gurl.h"
++
++namespace phlink::updater {
++namespace {
++
++using test_helpers::BuildRootSigned;
++using test_helpers::BuildSnapshotSigned;
++using test_helpers::BuildTargetsSigned;
++using test_helpers::BuildTimestampSigned;
++using test_helpers::Bytes;
++using test_helpers::Envelope;
++using test_helpers::MakeTestKey;
++using test_helpers::TestKey;
++
++constexpr char kFutureExpires[] = "2099-01-01T00:00:00Z";
++constexpr char kTargetName[] = "phlink-1.0.0-mac-arm64.zip";
++
++class UpdateCheckPipelineTest : public ::testing::Test {
++ protected:
++  UpdateCheckPipelineTest()
++      : shared_factory_(loader_factory_.GetSafeWeakWrapper()) {}
++
++  void SetUp() override { ASSERT_TRUE(temp_dir_.CreateUniqueTempDir()); }
++
++  base::FilePath staging() const { return temp_dir_.GetPath(); }
++
++  void SeedMetadata(const TestKey& root_key,
++                    const std::string& payload_body) {
++    std::array<uint8_t, 32> body_sha = crypto::hash::Sha256(payload_body);
++    std::string tgt_json = Envelope(
++        test_helpers::BuildTargetsSignedWithEntry(
++            /*version=*/1, kFutureExpires, kTargetName,
++            /*length=*/payload_body.size(), body_sha),
++        {&root_key});
++
++    std::string snap_json =
++        Envelope(BuildSnapshotSigned(1, kFutureExpires, 1), {&root_key});
++    std::string ts_json = Envelope(
++        BuildTimestampSigned(1, kFutureExpires, 1, snap_json), {&root_key});
++
++    loader_factory_.AddResponse("https://updates.example/timestamp.json",
++                                ts_json, net::HTTP_OK);
++    loader_factory_.AddResponse("https://updates.example/snapshot.json",
++                                snap_json, net::HTTP_OK);
++    loader_factory_.AddResponse("https://updates.example/targets.json",
++                                tgt_json, net::HTTP_OK);
++  }
++
++  UpdateCheckPipeline::Outcome RunPipeline(std::vector<uint8_t> root_json,
++                                           const std::string& target_name) {
++    UpdateCheckPipeline::Config cfg;
++    cfg.root_json = std::move(root_json);
++    cfg.metadata_base_url = GURL("https://updates.example/");
++    cfg.payload_base_url = GURL("https://updates.example/payloads/");
++    cfg.target_name = target_name;
++    cfg.target_version = "1.0.0";
++    cfg.staging_dir = staging();
++    UpdateCheckPipeline pipeline(shared_factory_, std::move(cfg));
++    base::RunLoop run_loop;
++    UpdateCheckPipeline::Outcome got =
++        UpdateCheckPipeline::Outcome::kMetadataError;
++    pipeline.Run(base::BindLambdaForTesting(
++        [&](UpdateCheckPipeline::Outcome o) {
++          got = o;
++          run_loop.Quit();
++        }));
++    run_loop.Run();
++    return got;
++  }
++
++  base::test::TaskEnvironment task_env_;
++  base::ScopedTempDir temp_dir_;
++  network::TestURLLoaderFactory loader_factory_;
++  scoped_refptr<network::WeakWrapperSharedURLLoaderFactory> shared_factory_;
++};
++
++TEST_F(UpdateCheckPipelineTest, HappyPathWritesStagedJson) {
++  TestKey root = MakeTestKey();
++  std::string root_json =
++      Envelope(BuildRootSigned(root, kFutureExpires), {&root});
++  std::vector<uint8_t> root_bytes(root_json.begin(), root_json.end());
++
++  const std::string payload = "phlink update payload bytes";
++  SeedMetadata(root, payload);
++  loader_factory_.AddResponse(
++      std::string("https://updates.example/payloads/") + kTargetName,
++      payload, net::HTTP_OK);
++
++  EXPECT_EQ(RunPipeline(root_bytes, kTargetName),
++            UpdateCheckPipeline::Outcome::kOk);
++  EXPECT_TRUE(base::PathExists(staging().AppendASCII("staged.json")));
++  std::optional<StagedPayload> staged = ReadStagedPayloadJson(staging());
++  ASSERT_TRUE(staged.has_value());
++  EXPECT_EQ(staged->version, "1.0.0");
++}
++
++TEST_F(UpdateCheckPipelineTest, MetadataErrorOnTimestampPropagates) {
++  TestKey root = MakeTestKey();
++  std::string root_json =
++      Envelope(BuildRootSigned(root, kFutureExpires), {&root});
++  std::vector<uint8_t> root_bytes(root_json.begin(), root_json.end());
++
++  loader_factory_.AddResponse("https://updates.example/timestamp.json", "",
++                              net::HTTP_INTERNAL_SERVER_ERROR);
++
++  EXPECT_EQ(RunPipeline(root_bytes, kTargetName),
++            UpdateCheckPipeline::Outcome::kMetadataError);
++  EXPECT_FALSE(base::PathExists(staging().AppendASCII("staged.json")));
++}
++
++TEST_F(UpdateCheckPipelineTest, TargetMissingReturnsKTargetMissing) {
++  TestKey root = MakeTestKey();
++  std::string root_json =
++      Envelope(BuildRootSigned(root, kFutureExpires), {&root});
++  std::vector<uint8_t> root_bytes(root_json.begin(), root_json.end());
++
++  // The default targets fixture only carries `kTargetName`; ask for a
++  // different platform/arch.
++  SeedMetadata(root, "ignored");
++  EXPECT_EQ(RunPipeline(root_bytes, "phlink-1.0.0-linux-x64.zip"),
++            UpdateCheckPipeline::Outcome::kTargetMissing);
++}
++
++TEST_F(UpdateCheckPipelineTest, PayloadHashMismatchReturnsKPayloadError) {
++  TestKey root = MakeTestKey();
++  std::string root_json =
++      Envelope(BuildRootSigned(root, kFutureExpires), {&root});
++  std::vector<uint8_t> root_bytes(root_json.begin(), root_json.end());
++
++  // Metadata expects payload "good"; the server returns "evil" instead.
++  SeedMetadata(root, "good");
++  loader_factory_.AddResponse(
++      std::string("https://updates.example/payloads/") + kTargetName,
++      "evil", net::HTTP_OK);
++
++  EXPECT_EQ(RunPipeline(root_bytes, kTargetName),
++            UpdateCheckPipeline::Outcome::kPayloadError);
++}
++
++}  // namespace
++}  // namespace phlink::updater
+-- 
+2.50.1 (Apple Git-155)
+
