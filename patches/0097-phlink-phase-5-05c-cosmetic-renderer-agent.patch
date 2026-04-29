@@ -1,0 +1,283 @@
+From 7635a1ff481c2d27682343fe43fea7fda8669fc2 Mon Sep 17 00:00:00 2001
+From: phlink <phlink@local>
+Date: Wed, 29 Apr 2026 13:38:02 +0530
+Subject: [PATCH] =?UTF-8?q?phlink:=20phase=205-05c=20=E2=80=94=20renderer?=
+ =?UTF-8?q?=20cosmetic=20filter=20agent?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Adds chrome/renderer/phlink/adblock/cosmetic_filter_agent.{h,cc}
+— a per-RenderFrame content::RenderFrameObserver that:
+
+  * On DidCommitProvisionalLoad, requests
+    phlink::mojom::AdblockCosmeticFilter via the frame's
+    BrowserInterfaceBrokerProxy and asks for cosmetic resources
+    keyed on the document URL.
+  * On the reply, concatenates hide_selectors into a single
+    'display: none' rule (with !important) and inserts it via
+    blink::WebDocument::InsertStyleSheet.
+  * Runs the optional injected_script (uBO-style +js scriptlet)
+    via blink::WebLocalFrame::ExecuteScript on the main world.
+  * Self-deletes on RenderFrame destruction.
+
+Skips non-http(s) URLs to avoid round-trips for chrome:// and
+devtools:// frames. Honors $generichide by dropping the bundle
+on that frame (conservative: matches Brave's renderer behavior).
+
+Wired into ChromeContentRendererClient::RenderFrameCreated next
+to the prerender observer. chrome target builds green;
+phlink_adblock_unittests 10/10 SUCCESS.
+
+This closes the 5-05 cosmetic-filter slice end-to-end:
+adblock-rust -> C++ Engine -> mojom -> CosmeticFilterHost
+-> CosmeticFilterAgent -> WebDocument.
+
+Refs PRD section 6.1, section 10.1 (engine never crosses into
+the renderer process), plan 5-05c.
+---
+ chrome/renderer/BUILD.gn                      |   3 +
+ .../chrome_content_renderer_client.cc         |   5 +
+ .../phlink/adblock/cosmetic_filter_agent.cc   | 118 ++++++++++++++++++
+ .../phlink/adblock/cosmetic_filter_agent.h    |  60 +++++++++
+ 4 files changed, 186 insertions(+)
+ create mode 100644 chrome/renderer/phlink/adblock/cosmetic_filter_agent.cc
+ create mode 100644 chrome/renderer/phlink/adblock/cosmetic_filter_agent.h
+
+diff --git a/chrome/renderer/BUILD.gn b/chrome/renderer/BUILD.gn
+index d32ae4c8e7ddb..3f37871170bb8 100644
+--- a/chrome/renderer/BUILD.gn
++++ b/chrome/renderer/BUILD.gn
+@@ -101,6 +101,8 @@ static_library("renderer") {
+     "net/net_error_page_controller.h",
+     "net_benchmarking_extension.cc",
+     "net_benchmarking_extension.h",
++    "phlink/adblock/cosmetic_filter_agent.cc",
++    "phlink/adblock/cosmetic_filter_agent.h",
+     "plugins/non_loadable_plugin_placeholder.cc",
+     "plugins/non_loadable_plugin_placeholder.h",
+     "plugins/pdf_plugin_placeholder.cc",
+@@ -137,6 +139,7 @@ static_library("renderer") {
+     "//chrome:strings",
+     "//chrome/common",
+     "//chrome/common:mojo_bindings",
++    "//chrome/common:phlink_adblock_mojom",
+     "//chrome/common/net",
+     "//chrome/common/request_header_integrity:buildflags",
+     "//chrome/common/search:mojo_bindings",
+diff --git a/chrome/renderer/chrome_content_renderer_client.cc b/chrome/renderer/chrome_content_renderer_client.cc
+index 3105bffe8ee4f..5cb73398b0134 100644
+--- a/chrome/renderer/chrome_content_renderer_client.cc
++++ b/chrome/renderer/chrome_content_renderer_client.cc
+@@ -62,6 +62,7 @@
+ #include "chrome/renderer/media/webrtc_logging_agent_impl.h"
+ #include "chrome/renderer/net/net_error_helper.h"
+ #include "chrome/renderer/net_benchmarking_extension.h"
++#include "chrome/renderer/phlink/adblock/cosmetic_filter_agent.h"
+ #include "chrome/renderer/plugins/non_loadable_plugin_placeholder.h"
+ #include "chrome/renderer/plugins/pdf_plugin_placeholder.h"
+ #include "chrome/renderer/process_state.h"
+@@ -611,6 +612,10 @@ void ChromeContentRendererClient::RenderFrameCreated(
+ 
+   new prerender::NoStatePrefetchRenderFrameObserver(render_frame);
+ 
++  // phlink: per-frame cosmetic-filter agent. Owns its own lifetime and
++  // self-deletes when the RenderFrame is destroyed.
++  new phlink::adblock::CosmeticFilterAgent(render_frame);
++
+   auto content_settings_delegate =
+       std::make_unique<ChromeContentSettingsAgentDelegate>(render_frame);
+ #if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+diff --git a/chrome/renderer/phlink/adblock/cosmetic_filter_agent.cc b/chrome/renderer/phlink/adblock/cosmetic_filter_agent.cc
+new file mode 100644
+index 0000000000000..610f34498bded
+--- /dev/null
++++ b/chrome/renderer/phlink/adblock/cosmetic_filter_agent.cc
+@@ -0,0 +1,118 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/renderer/phlink/adblock/cosmetic_filter_agent.h"
++
++#include <string>
++#include <utility>
++
++#include "base/strings/strcat.h"
++#include "base/strings/string_util.h"
++#include "content/public/renderer/render_frame.h"
++#include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
++#include "third_party/blink/public/platform/web_string.h"
++#include "third_party/blink/public/web/web_document.h"
++#include "third_party/blink/public/web/web_local_frame.h"
++#include "third_party/blink/public/web/web_script_source.h"
++#include "url/gurl.h"
++
++namespace phlink::adblock {
++
++namespace {
++
++// Concatenates selectors into a single stylesheet rule. Phlink uses
++// `display: none !important;` rather than `visibility: hidden` to match
++// uBlock Origin's default behavior so existing element-hide rules don't
++// behave differently under phlink.
++std::string BuildStyleSheet(const std::vector<std::string>& selectors) {
++  if (selectors.empty()) {
++    return std::string();
++  }
++  std::string css = base::JoinString(selectors, ", ");
++  css += " { display: none !important; }";
++  return css;
++}
++
++}  // namespace
++
++CosmeticFilterAgent::CosmeticFilterAgent(content::RenderFrame* render_frame)
++    : content::RenderFrameObserver(render_frame) {}
++
++CosmeticFilterAgent::~CosmeticFilterAgent() = default;
++
++void CosmeticFilterAgent::OnDestruct() {
++  delete this;
++}
++
++void CosmeticFilterAgent::DidCommitProvisionalLoad(
++    ui::PageTransition /*transition*/) {
++  blink::WebLocalFrame* frame = render_frame()->GetWebFrame();
++  if (!frame) {
++    return;
++  }
++  const GURL document_url = frame->GetDocument().Url();
++  // Skip empty / unsupported URLs — the browser-side host applies the
++  // same scheme guard, but short-circuiting here avoids the round-trip
++  // entirely for chrome:// and devtools:// navigations.
++  if (!document_url.is_valid() ||
++      !(document_url.SchemeIs("http") || document_url.SchemeIs("https"))) {
++    return;
++  }
++
++  mojom::AdblockCosmeticFilter* host = GetHost();
++  if (!host) {
++    return;
++  }
++  host->GetCosmeticResources(
++      document_url,
++      base::BindOnce(&CosmeticFilterAgent::OnCosmeticResources,
++                     weak_factory_.GetWeakPtr()));
++}
++
++mojom::AdblockCosmeticFilter* CosmeticFilterAgent::GetHost() {
++  if (host_.is_bound() && host_.is_connected()) {
++    return host_.get();
++  }
++  host_.reset();
++  if (!render_frame()) {
++    return nullptr;
++  }
++  render_frame()->GetBrowserInterfaceBroker().GetInterface(
++      host_.BindNewPipeAndPassReceiver());
++  return host_.get();
++}
++
++void CosmeticFilterAgent::OnCosmeticResources(
++    mojom::AdblockCosmeticResourcesPtr resources) {
++  if (!resources || !render_frame()) {
++    return;
++  }
++  blink::WebLocalFrame* frame = render_frame()->GetWebFrame();
++  if (!frame) {
++    return;
++  }
++
++  std::vector<std::string> selectors;
++  if (!resources->generichide) {
++    selectors = std::move(resources->hide_selectors);
++  } else {
++    // `$generichide` exception: drop generic selectors. adblock-rust
++    // already partitions them on the browser side; in this v1 surface
++    // we simply skip the entire bundle when generichide is set, which
++    // matches Brave's renderer-side behavior for $generichide on a
++    // top-level frame and is conservative for sub-frames.
++  }
++
++  std::string css = BuildStyleSheet(selectors);
++  if (!css.empty()) {
++    frame->GetDocument().InsertStyleSheet(blink::WebString::FromUtf8(css));
++  }
++
++  if (!resources->injected_script.empty()) {
++    frame->ExecuteScript(blink::WebScriptSource(
++        blink::WebString::FromUtf8(resources->injected_script)));
++  }
++}
++
++}  // namespace phlink::adblock
+diff --git a/chrome/renderer/phlink/adblock/cosmetic_filter_agent.h b/chrome/renderer/phlink/adblock/cosmetic_filter_agent.h
+new file mode 100644
+index 0000000000000..0c1d3eb68a620
+--- /dev/null
++++ b/chrome/renderer/phlink/adblock/cosmetic_filter_agent.h
+@@ -0,0 +1,60 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_RENDERER_PHLINK_ADBLOCK_COSMETIC_FILTER_AGENT_H_
++#define CHROME_RENDERER_PHLINK_ADBLOCK_COSMETIC_FILTER_AGENT_H_
++
++#include "base/memory/weak_ptr.h"
++#include "chrome/common/phlink_adblock.mojom.h"
++#include "content/public/renderer/render_frame_observer.h"
++#include "mojo/public/cpp/bindings/remote.h"
++
++namespace content {
++class RenderFrame;
++}  // namespace content
++
++namespace phlink::adblock {
++
++// Renderer-side agent that pulls per-URL cosmetic resources from the
++// browser process at document-start (`DidCommitProvisionalLoad`) and
++// applies them to the current `WebDocument`:
++//
++//   * concatenates `hide_selectors` into a `display: none !important;`
++//     stylesheet inserted via `WebDocument::InsertStyleSheet`;
++//   * runs `injected_script` through `WebLocalFrame::ExecuteScript`
++//     (uBO-style `+js(...)` scriptlets).
++//
++// The agent self-deletes when its `RenderFrame` is destroyed. It is
++// instantiated once per RenderFrame in
++// `ChromeContentRendererClient::RenderFrameCreated`.
++class CosmeticFilterAgent : public content::RenderFrameObserver {
++ public:
++  explicit CosmeticFilterAgent(content::RenderFrame* render_frame);
++
++  CosmeticFilterAgent(const CosmeticFilterAgent&) = delete;
++  CosmeticFilterAgent& operator=(const CosmeticFilterAgent&) = delete;
++
++  ~CosmeticFilterAgent() override;
++
++ private:
++  // content::RenderFrameObserver:
++  void DidCommitProvisionalLoad(ui::PageTransition transition) override;
++  void OnDestruct() override;
++
++  // Lazily binds (or rebinds on disconnect) `host_` to the browser
++  // process's `phlink::mojom::AdblockCosmeticFilter` implementation
++  // and returns it. Returns null if the frame is in a state where
++  // interface acquisition is not possible (e.g. detached).
++  mojom::AdblockCosmeticFilter* GetHost();
++
++  // Mojo response handler.
++  void OnCosmeticResources(mojom::AdblockCosmeticResourcesPtr resources);
++
++  mojo::Remote<mojom::AdblockCosmeticFilter> host_;
++  base::WeakPtrFactory<CosmeticFilterAgent> weak_factory_{this};
++};
++
++}  // namespace phlink::adblock
++
++#endif  // CHROME_RENDERER_PHLINK_ADBLOCK_COSMETIC_FILTER_AGENT_H_
+-- 
+2.50.1 (Apple Git-155)
+
