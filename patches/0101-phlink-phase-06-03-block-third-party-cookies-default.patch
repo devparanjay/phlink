@@ -1,0 +1,48 @@
+From 5c702ff7aea45a1fc97a18c3bc46367913748016 Mon Sep 17 00:00:00 2001
+From: phlink <phlink@local>
+Date: Wed, 29 Apr 2026 14:42:15 +0530
+Subject: [PATCH] =?UTF-8?q?phlink:=20phase=2006-03=20=E2=80=94=20block=20t?=
+ =?UTF-8?q?hird-party=20cookies=20by=20default?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Per PRD §6 PRIV-03, phlink blocks third-party cookies by default in
+all profiles, not only incognito. Upstream defaults
+prefs::kCookieControlsMode to CookieControlsMode::kIncognitoOnly;
+phlink defaults it to CookieControlsMode::kBlockThirdParty.
+
+Behavior:
+- Regular and Guest profiles: 3p cookies blocked.
+- Incognito: unchanged (still blocked, same as upstream).
+- The user can still flip the toggle in Settings > Privacy. The pref
+  is SYNCABLE so existing user choices win once Phase 9 brings
+  encrypted profile import.
+
+Refs PRD §6 (PRIV-03), plan 06-03.
+---
+ components/content_settings/core/browser/cookie_settings.cc | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/components/content_settings/core/browser/cookie_settings.cc b/components/content_settings/core/browser/cookie_settings.cc
+index fa0319e885d60..e7e533ebeece5 100644
+--- a/components/content_settings/core/browser/cookie_settings.cc
++++ b/components/content_settings/core/browser/cookie_settings.cc
+@@ -76,9 +76,13 @@ ContentSettingsForOneType CookieSettings::GetCookieSettings() const {
+ 
+ void CookieSettings::RegisterProfilePrefs(
+     user_prefs::PrefRegistrySyncable* registry) {
++  // phlink (PRD §6 PRIV-03 / plan 06-03): block third-party cookies by
++  // default in regular profiles too. Upstream defaults to
++  // `kIncognitoOnly` (block in incognito only). The user can still
++  // relax this via Settings > Privacy.
+   registry->RegisterIntegerPref(
+       prefs::kCookieControlsMode,
+-      static_cast<int>(CookieControlsMode::kIncognitoOnly),
++      static_cast<int>(CookieControlsMode::kBlockThirdParty),
+       user_prefs::PrefRegistrySyncable::SYNCABLE_PREF);
+ }
+ 
+-- 
+2.50.1 (Apple Git-155)
+
