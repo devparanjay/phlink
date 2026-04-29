@@ -1,0 +1,59 @@
+From af0184c55358515fc895634f60f4367a1286dd60 Mon Sep 17 00:00:00 2001
+From: phlink <phlink@local>
+Date: Wed, 29 Apr 2026 14:45:00 +0530
+Subject: [PATCH] =?UTF-8?q?phlink:=20phase=2006-06=20=E2=80=94=20network-s?=
+ =?UTF-8?q?tate=20isolation=20per=20top-level=20site?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Per PRD §6 PRIV-06, phlink isolates network state per top-level site
+so that cross-site loads cannot piggy-back on a peer site's cached
+responses, V8 code cache entries, or open HTTP/socket connections.
+Upstream Chromium ships these features `DISABLED_BY_DEFAULT` because
+of cache-hit-rate regressions. phlink accepts the trade-off.
+
+Flips, in net/base/features.cc:
+- kSplitCacheByNetworkIsolationKey                 OFF → ON
+- kSplitCodeCacheByNetworkIsolationKey             OFF → ON
+- kPartitionConnectionsByNetworkIsolationKey       OFF → ON
+
+`kSplitHostCacheByNetworkAnonymizationKey` and
+`kThirdPartyStoragePartitioning` are already enabled upstream and
+remain unchanged.
+
+Refs PRD §6 (PRIV-06), plan 06-06.
+---
+ net/base/features.cc | 11 ++++++++---
+ 1 file changed, 8 insertions(+), 3 deletions(-)
+
+diff --git a/net/base/features.cc b/net/base/features.cc
+index 7c114ad0d084e..725b01900f0f5 100644
+--- a/net/base/features.cc
++++ b/net/base/features.cc
+@@ -125,14 +125,19 @@ const base::FeatureParam<base::TimeDelta>
+ BASE_FEATURE(kSplitCacheByIncludeCredentials,
+              base::FEATURE_DISABLED_BY_DEFAULT);
+ 
++// phlink (PRD §6 PRIV-06 / plan 06-06): partition the HTTP cache,
++// V8 code cache, and HTTP/socket connection pool per top-level site
++// so cross-site loads cannot piggy-back on a peer site's cached
++// responses or open connections. These default OFF upstream because
++// of cache-hit-rate regressions; phlink accepts that trade-off.
+ BASE_FEATURE(kSplitCacheByNetworkIsolationKey,
+-             base::FEATURE_DISABLED_BY_DEFAULT);
++             base::FEATURE_ENABLED_BY_DEFAULT);
+ 
+ BASE_FEATURE(kSplitCodeCacheByNetworkIsolationKey,
+-             base::FEATURE_DISABLED_BY_DEFAULT);
++             base::FEATURE_ENABLED_BY_DEFAULT);
+ 
+ BASE_FEATURE(kPartitionConnectionsByNetworkIsolationKey,
+-             base::FEATURE_DISABLED_BY_DEFAULT);
++             base::FEATURE_ENABLED_BY_DEFAULT);
+ 
+ BASE_FEATURE(kSplitHostCacheByNetworkAnonymizationKey,
+              base::FEATURE_ENABLED_BY_DEFAULT);
+-- 
+2.50.1 (Apple Git-155)
+
