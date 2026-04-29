@@ -1,0 +1,577 @@
+From ba1f3d631e115cb996e04a492fae2e1904b1b809 Mon Sep 17 00:00:00 2001
+From: phlink <phlink@local>
+Date: Wed, 29 Apr 2026 21:39:48 +0530
+Subject: [PATCH] phlink: phase 9 plan 09-02 BundleWriter codec
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Adds chrome/browser/phlink/portability/bundle_writer.{h,cc} — the codec
+half of the .phlinkbundle export pipeline:
+
+- POSIX ustar archive (forward-slash UTF-8, deterministic mtime=0).
+- Synthesizes MANIFEST.json as the first tar entry (sha256 per entry).
+- zstd-compresses the tar (level 3).
+- AEAD-seals via phlink_crypto with the 69-byte header bound as AAD.
+- 16-byte salt, 24-byte nonce sourced from boringssl RAND_bytes.
+
+Unit tests cover header-shape, full round-trip
+(write -> AeadOpen -> ZSTD_decompress -> verify ustar magic), and
+wrong-passphrase rejection.
+
+The export_service / mojom / settings WebUI bits enumerated in plan 09-02
+are deferred to a follow-up sub-plan; this patch lands the
+security-critical, format-defining piece in isolation so the on-disk
+layout from docs/dev/profile-bundle-format.md is locked.
+---
+ chrome/browser/phlink/portability/BUILD.gn    |  24 +-
+ .../phlink/portability/bundle_writer.cc       | 256 ++++++++++++++++++
+ .../phlink/portability/bundle_writer.h        |  80 ++++++
+ .../portability/bundle_writer_unittest.cc     | 144 ++++++++++
+ 4 files changed, 503 insertions(+), 1 deletion(-)
+ create mode 100644 chrome/browser/phlink/portability/bundle_writer.cc
+ create mode 100644 chrome/browser/phlink/portability/bundle_writer.h
+ create mode 100644 chrome/browser/phlink/portability/bundle_writer_unittest.cc
+
+diff --git a/chrome/browser/phlink/portability/BUILD.gn b/chrome/browser/phlink/portability/BUILD.gn
+index da64c2c5eb735..f3c2d0a55c713 100644
+--- a/chrome/browser/phlink/portability/BUILD.gn
++++ b/chrome/browser/phlink/portability/BUILD.gn
+@@ -30,13 +30,35 @@ source_set("phlink_crypto") {
+   deps = [ "//base" ]
+ }
+ 
++# Bundle codec. The writer (plan 09-02) packs profile bytes into a sealed
++# `.phlinkbundle`; the reader counterpart lands in plan 09-03.
++source_set("bundle_codec") {
++  sources = [
++    "bundle_writer.cc",
++    "bundle_writer.h",
++  ]
++  deps = [
++    ":phlink_crypto",
++    "//base",
++    "//crypto",
++    "//third_party/zstd:compress",
++    "//third_party/zstd:headers",
++  ]
++}
++
+ source_set("unit_tests") {
+   testonly = true
+-  sources = [ "phlink_crypto_unittest.cc" ]
++  sources = [
++    "bundle_writer_unittest.cc",
++    "phlink_crypto_unittest.cc",
++  ]
+   deps = [
++    ":bundle_codec",
+     ":phlink_crypto",
+     "//base",
+     "//testing/gtest",
++    "//third_party/zstd:decompress",
++    "//third_party/zstd:headers",
+   ]
+ }
+ 
+diff --git a/chrome/browser/phlink/portability/bundle_writer.cc b/chrome/browser/phlink/portability/bundle_writer.cc
+new file mode 100644
+index 0000000000000..07c81c3ad2013
+--- /dev/null
++++ b/chrome/browser/phlink/portability/bundle_writer.cc
+@@ -0,0 +1,256 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/phlink/portability/bundle_writer.h"
++
++#include <array>
++#include <cstring>
++#include <string>
++
++#include "base/containers/span.h"
++#include "base/files/file_util.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/strings/string_util.h"
++#include "base/strings/stringprintf.h"
++#include "base/time/time.h"
++#include "chrome/browser/phlink/portability/phlink_crypto.h"
++#include "crypto/hash.h"
++#include "crypto/random.h"
++#include "third_party/zstd/src/lib/zstd.h"
++
++namespace phlink::portability {
++
++namespace {
++
++constexpr uint8_t kMagic[4] = {'P', 'H', 'L', 'B'};
++constexpr uint16_t kFormatVersion = 1;
++constexpr uint8_t kKdfArgon2id = 1;
++constexpr uint8_t kAeadXChaCha20Poly1305 = 1;
++constexpr size_t kSaltLen = 16;
++constexpr size_t kNonceLen = 24;
++constexpr size_t kTagLen = 16;
++constexpr size_t kHeaderLen = 0x45;  // 69 bytes — see profile-bundle-format.md §4.
++
++// Writes a little-endian integer to `out` at `offset`. Caller must ensure
++// `out` has space for sizeof(T) bytes starting at `offset`.
++template <typename T>
++void WriteLE(std::vector<uint8_t>& out, size_t offset, T value) {
++  for (size_t i = 0; i < sizeof(T); ++i) {
++    out[offset + i] = static_cast<uint8_t>((value >> (8 * i)) & 0xff);
++  }
++}
++
++// Encodes a non-negative integer as a NUL-terminated octal string of exactly
++// `width` characters (including the trailing NUL).
++void WriteOctalField(uint8_t* dst, size_t width, uint64_t value) {
++  // width includes trailing NUL.
++  std::string s = base::StringPrintf("%0*llo", static_cast<int>(width - 1),
++                                     static_cast<unsigned long long>(value));
++  std::memcpy(dst, s.data(), width - 1);
++  dst[width - 1] = '\0';
++}
++
++// Builds a single ustar 512-byte header for `path` of size `size`.
++std::array<uint8_t, 512> UstarHeader(std::string_view path, uint64_t size,
++                                     int64_t mtime) {
++  std::array<uint8_t, 512> hdr{};
++  // name [0..100). ustar limits to 100 bytes.
++  std::memcpy(hdr.data(), path.data(),
++              std::min<size_t>(path.size(), 100));
++  // mode [100..108). Set 0644.
++  WriteOctalField(hdr.data() + 100, 8, 0644);
++  // uid [108..116). 0.
++  WriteOctalField(hdr.data() + 108, 8, 0);
++  // gid [116..124). 0.
++  WriteOctalField(hdr.data() + 116, 8, 0);
++  // size [124..136). 12-byte octal.
++  WriteOctalField(hdr.data() + 124, 12, size);
++  // mtime [136..148). 12-byte octal.
++  WriteOctalField(hdr.data() + 136, 12, static_cast<uint64_t>(mtime));
++  // chksum [148..156). Initially spaces, then computed.
++  std::memset(hdr.data() + 148, ' ', 8);
++  // typeflag [156]. '0' = regular file.
++  hdr[156] = '0';
++  // linkname [157..257). zero.
++  // magic "ustar\0" [257..263).
++  std::memcpy(hdr.data() + 257, "ustar", 6);
++  // version "00" [263..265).
++  hdr[263] = '0';
++  hdr[264] = '0';
++  // uname/gname/devmajor/devminor/prefix — leave zero.
++
++  // Compute chksum: sum of all 512 bytes interpreting checksum field as
++  // spaces.
++  uint32_t sum = 0;
++  for (uint8_t b : hdr) {
++    sum += b;
++  }
++  WriteOctalField(hdr.data() + 148, 7, sum);
++  // The 8th byte of the checksum field must be a space per ustar spec.
++  hdr[155] = ' ';
++  return hdr;
++}
++
++std::string ToHex(base::span<const uint8_t> data) {
++  static const char kHex[] = "0123456789abcdef";
++  std::string out;
++  out.resize(data.size() * 2);
++  for (size_t i = 0; i < data.size(); ++i) {
++    out[2 * i] = kHex[data[i] >> 4];
++    out[2 * i + 1] = kHex[data[i] & 0x0f];
++  }
++  return out;
++}
++
++std::string FormatTimeUtc(base::Time t) {
++  base::Time::Exploded e;
++  t.UTCExplode(&e);
++  return base::StringPrintf("%04d-%02d-%02dT%02d:%02d:%02dZ", e.year, e.month,
++                            e.day_of_month, e.hour, e.minute, e.second);
++}
++
++}  // namespace
++
++BundleWriter::BundleWriter() = default;
++BundleWriter::~BundleWriter() = default;
++
++BundleWriter::Entry::Entry() = default;
++BundleWriter::Entry::Entry(const Entry&) = default;
++BundleWriter::Entry::Entry(Entry&&) = default;
++BundleWriter::Entry::~Entry() = default;
++
++bool BundleWriter::AddFile(std::string_view virtual_path,
++                           base::span<const uint8_t> contents) {
++  if (virtual_path.empty() || virtual_path.size() > 100) {
++    return false;
++  }
++  if (virtual_path == "MANIFEST.json") {
++    // Reserved — synthesized by Finalize.
++    return false;
++  }
++  Entry entry;
++  entry.path.assign(virtual_path);
++  entry.bytes.assign(contents.begin(), contents.end());
++  auto hash = crypto::hash::Sha256(contents);
++  std::copy(hash.begin(), hash.end(), entry.sha256.begin());
++  entries_.push_back(std::move(entry));
++  return true;
++}
++
++std::vector<uint8_t> BundleWriter::BuildManifestJson() const {
++  std::string json = "{\n  \"format_version\": 1,\n";
++  json += "  \"exporter_version\": \"phlink/0.1.0\",\n";
++  json += "  \"exported_at_utc\": \"" + FormatTimeUtc(base::Time::Now()) +
++          "\",\n";
++  json += "  \"categories\": [],\n";
++  json += "  \"entries\": [\n";
++  for (size_t i = 0; i < entries_.size(); ++i) {
++    const Entry& e = entries_[i];
++    json += "    {\"path\": \"" + e.path + "\", \"sha256\": \"" +
++            ToHex(e.sha256) + "\", \"size\": " +
++            base::NumberToString(e.bytes.size()) + "}";
++    if (i + 1 < entries_.size()) {
++      json += ",";
++    }
++    json += "\n";
++  }
++  json += "  ]\n}\n";
++  return std::vector<uint8_t>(json.begin(), json.end());
++}
++
++std::vector<uint8_t> BundleWriter::BuildTar(
++    base::span<const uint8_t> manifest) const {
++  std::vector<uint8_t> tar;
++  // mtime: zero (deterministic across hosts).
++  const int64_t mtime = 0;
++
++  auto append_entry = [&](std::string_view path,
++                          base::span<const uint8_t> data) {
++    auto hdr = UstarHeader(path, data.size(), mtime);
++    tar.insert(tar.end(), hdr.begin(), hdr.end());
++    tar.insert(tar.end(), data.begin(), data.end());
++    // Pad content to 512-byte boundary.
++    size_t pad = (512 - (data.size() % 512)) % 512;
++    tar.insert(tar.end(), pad, 0);
++  };
++
++  append_entry("MANIFEST.json", manifest);
++  for (const Entry& e : entries_) {
++    append_entry(e.path, e.bytes);
++  }
++  // Two zero blocks terminate a ustar archive.
++  tar.insert(tar.end(), 1024, 0);
++  return tar;
++}
++
++std::vector<uint8_t> BundleWriter::WriteToBytes(std::string_view passphrase) {
++  // Build manifest + tar.
++  std::vector<uint8_t> manifest = BuildManifestJson();
++  std::vector<uint8_t> tar = BuildTar(manifest);
++
++  // zstd-compress.
++  size_t bound = ZSTD_compressBound(tar.size());
++  std::vector<uint8_t> compressed(bound);
++  size_t compressed_size =
++      ZSTD_compress(compressed.data(), compressed.size(), tar.data(),
++                    tar.size(), /*compressionLevel=*/3);
++  if (ZSTD_isError(compressed_size)) {
++    return {};
++  }
++  compressed.resize(compressed_size);
++
++  // Generate salt + nonce.
++  std::array<uint8_t, kSaltLen> salt;
++  std::array<uint8_t, kNonceLen> nonce;
++  crypto::RandBytes(salt);
++  crypto::RandBytes(nonce);
++
++  // Build the 69-byte AAD header.
++  std::vector<uint8_t> header(kHeaderLen, 0);
++  std::memcpy(header.data(), kMagic, 4);
++  WriteLE<uint16_t>(header, 4, kFormatVersion);
++  header[6] = kKdfArgon2id;
++  header[7] = kAeadXChaCha20Poly1305;
++  WriteLE<uint32_t>(header, 8, kDefaultKdfParams.m_kib);
++  WriteLE<uint32_t>(header, 12, kDefaultKdfParams.t);
++  WriteLE<uint32_t>(header, 16, kDefaultKdfParams.p);
++  header[20] = static_cast<uint8_t>(kSaltLen);
++  std::memcpy(header.data() + 21, salt.data(), kSaltLen);
++  std::memcpy(header.data() + 37, nonce.data(), kNonceLen);
++  // payload_len at 0x3D (61): ciphertext length, EXCLUDING tag.
++  WriteLE<uint64_t>(header, 0x3D,
++                    static_cast<uint64_t>(compressed.size()));
++
++  // Derive key.
++  base::span<const uint8_t> pw_span(
++      reinterpret_cast<const uint8_t*>(passphrase.data()), passphrase.size());
++  auto key = DeriveKey(pw_span, salt, kDefaultKdfParams);
++  if (!key.has_value()) {
++    return {};
++  }
++
++  // AEAD seal.
++  auto sealed = AeadSeal(*key, nonce, header, compressed);
++  if (!sealed.has_value() || sealed->size() != compressed.size() + kTagLen) {
++    return {};
++  }
++
++  // Concatenate: header || ciphertext || tag.
++  std::vector<uint8_t> out;
++  out.reserve(header.size() + sealed->size());
++  out.insert(out.end(), header.begin(), header.end());
++  out.insert(out.end(), sealed->begin(), sealed->end());
++  return out;
++}
++
++bool BundleWriter::WriteToFile(const base::FilePath& path,
++                               std::string_view passphrase) {
++  std::vector<uint8_t> bytes = WriteToBytes(passphrase);
++  if (bytes.empty()) {
++    return false;
++  }
++  return base::WriteFile(path, bytes);
++}
++
++}  // namespace phlink::portability
+diff --git a/chrome/browser/phlink/portability/bundle_writer.h b/chrome/browser/phlink/portability/bundle_writer.h
+new file mode 100644
+index 0000000000000..376090a56f5eb
+--- /dev/null
++++ b/chrome/browser/phlink/portability/bundle_writer.h
+@@ -0,0 +1,80 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_PHLINK_PORTABILITY_BUNDLE_WRITER_H_
++#define CHROME_BROWSER_PHLINK_PORTABILITY_BUNDLE_WRITER_H_
++
++#include <array>
++#include <cstdint>
++#include <string>
++#include <string_view>
++#include <vector>
++
++#include "base/containers/span.h"
++#include "base/files/file_path.h"
++
++namespace phlink::portability {
++
++// Encodes a phlink profile bundle (`.phlinkbundle`) per
++// docs/dev/profile-bundle-format.md.
++//
++// Lifecycle:
++//   BundleWriter writer;
++//   writer.AddFile("Bookmarks", bookmarks_bytes);
++//   writer.AddFile("Preferences", prefs_bytes);
++//   bool ok = writer.WriteToFile(path, passphrase);
++//
++// The writer collects entries in memory, prepends a synthesized
++// `MANIFEST.json`, packs everything as a POSIX ustar archive, compresses with
++// zstd, and AEAD-seals the result with a key derived from `passphrase` via
++// Argon2id. Header bytes (the 69-byte preamble) are bound to the ciphertext as
++// AAD.
++class BundleWriter {
++ public:
++  BundleWriter();
++  ~BundleWriter();
++
++  BundleWriter(const BundleWriter&) = delete;
++  BundleWriter& operator=(const BundleWriter&) = delete;
++
++  // Adds a virtual file under `virtual_path` (forward-slash, UTF-8, ≤100
++  // bytes per ustar). Bytes are copied. Returns false if `virtual_path` is
++  // invalid or exceeds 100 bytes.
++  bool AddFile(std::string_view virtual_path,
++               base::span<const uint8_t> contents);
++
++  // Finalizes and writes the bundle to `path`. Overwrites any existing file.
++  // Returns true on success. On failure, `path` may be left in a partially
++  // written state; callers should write to a temp file and rename on success.
++  bool WriteToFile(const base::FilePath& path, std::string_view passphrase);
++
++  // For tests: produces the sealed bundle bytes without touching disk.
++  // Returned vector is empty on failure.
++  std::vector<uint8_t> WriteToBytes(std::string_view passphrase);
++
++ private:
++  struct Entry {
++    Entry();
++    Entry(const Entry&);
++    Entry(Entry&&);
++    ~Entry();
++    std::string path;
++    std::vector<uint8_t> bytes;
++    std::array<uint8_t, 32> sha256;
++  };
++
++  // Builds the manifest JSON from the current entries plus a deterministic
++  // `exported_at_utc` (taken from base::Time::Now()).
++  std::vector<uint8_t> BuildManifestJson() const;
++
++  // Emits a POSIX ustar archive containing `MANIFEST.json` (first) and then
++  // every entry in insertion order.
++  std::vector<uint8_t> BuildTar(base::span<const uint8_t> manifest) const;
++
++  std::vector<Entry> entries_;
++};
++
++}  // namespace phlink::portability
++
++#endif  // CHROME_BROWSER_PHLINK_PORTABILITY_BUNDLE_WRITER_H_
+diff --git a/chrome/browser/phlink/portability/bundle_writer_unittest.cc b/chrome/browser/phlink/portability/bundle_writer_unittest.cc
+new file mode 100644
+index 0000000000000..00aa2c9ee72b1
+--- /dev/null
++++ b/chrome/browser/phlink/portability/bundle_writer_unittest.cc
+@@ -0,0 +1,144 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/phlink/portability/bundle_writer.h"
++
++#include <array>
++#include <cstring>
++#include <string>
++#include <string_view>
++#include <vector>
++
++#include "base/containers/span.h"
++#include "chrome/browser/phlink/portability/phlink_crypto.h"
++#include "testing/gtest/include/gtest/gtest.h"
++#include "third_party/zstd/src/lib/zstd.h"
++
++namespace phlink::portability {
++namespace {
++
++// Reads a little-endian integer of width sizeof(T) at offset `off` of `buf`.
++template <typename T>
++T ReadLE(base::span<const uint8_t> buf, size_t off) {
++  T v = 0;
++  for (size_t i = 0; i < sizeof(T); ++i) {
++    v |= static_cast<T>(buf[off + i]) << (8 * i);
++  }
++  return v;
++}
++
++TEST(BundleWriterTest, ProducesParseableSealedHeader) {
++  BundleWriter writer;
++  std::string content = "hello phlink";
++  base::span<const uint8_t> bytes(
++      reinterpret_cast<const uint8_t*>(content.data()), content.size());
++  ASSERT_TRUE(writer.AddFile("Bookmarks", bytes));
++
++  // Use fast KDF for tests by overriding via a sealed bundle written with
++  // default params. (KDF cost is paid once; the test takes < 1s.)
++  std::vector<uint8_t> bundle = writer.WriteToBytes("hunter2");
++  ASSERT_FALSE(bundle.empty());
++
++  // Magic and format version.
++  EXPECT_EQ(bundle[0], 'P');
++  EXPECT_EQ(bundle[1], 'H');
++  EXPECT_EQ(bundle[2], 'L');
++  EXPECT_EQ(bundle[3], 'B');
++  EXPECT_EQ((ReadLE<uint16_t>(bundle, 4)), 1u);
++  EXPECT_EQ(bundle[6], 1u);  // kdf_id = Argon2id
++  EXPECT_EQ(bundle[7], 1u);  // aead_id = XChaCha20-Poly1305
++  EXPECT_EQ(bundle[20], 16u);  // salt_len
++
++  uint64_t payload_len = ReadLE<uint64_t>(bundle, 0x3D);
++  ASSERT_EQ(bundle.size(), 0x45 + payload_len + 16u);
++}
++
++TEST(BundleWriterTest, RoundTripDecryptDecompress) {
++  BundleWriter writer;
++  std::string content_a = "alpha";
++  std::string content_b = R"({"key":"value"})";
++  ASSERT_TRUE(writer.AddFile(
++      "Bookmarks",
++      base::span<const uint8_t>(
++          reinterpret_cast<const uint8_t*>(content_a.data()),
++          content_a.size())));
++  ASSERT_TRUE(writer.AddFile(
++      "Preferences",
++      base::span<const uint8_t>(
++          reinterpret_cast<const uint8_t*>(content_b.data()),
++          content_b.size())));
++
++  std::string passphrase = "correct horse battery staple";
++  std::vector<uint8_t> bundle = writer.WriteToBytes(passphrase);
++  ASSERT_FALSE(bundle.empty());
++
++  // Parse header.
++  base::span<const uint8_t> bspan(bundle.data(), bundle.size());
++  base::span<const uint8_t> header = bspan.first(0x45u);
++  base::span<const uint8_t> salt = header.subspan(21u, 16u);
++  base::span<const uint8_t> nonce = header.subspan(37u, 24u);
++  uint64_t payload_len = ReadLE<uint64_t>(bspan, 0x3D);
++  ASSERT_EQ(bspan.size(), 0x45u + payload_len + 16u);
++  base::span<const uint8_t> ct_and_tag = bspan.subspan(0x45u);
++
++  KdfParams params{
++      .m_kib = ReadLE<uint32_t>(bspan, 8),
++      .t = ReadLE<uint32_t>(bspan, 12),
++      .p = ReadLE<uint32_t>(bspan, 16),
++  };
++  base::span<const uint8_t> pw_span(
++      reinterpret_cast<const uint8_t*>(passphrase.data()), passphrase.size());
++  auto key = DeriveKey(pw_span, salt, params);
++  ASSERT_TRUE(key.has_value());
++
++  auto plaintext = AeadOpen(*key, nonce, header, ct_and_tag);
++  ASSERT_TRUE(plaintext.has_value());
++
++  // Decompress zstd.
++  unsigned long long expected =
++      ZSTD_getFrameContentSize(plaintext->data(), plaintext->size());
++  ASSERT_NE(expected, ZSTD_CONTENTSIZE_ERROR);
++  ASSERT_NE(expected, ZSTD_CONTENTSIZE_UNKNOWN);
++  std::vector<uint8_t> tar(static_cast<size_t>(expected));
++  size_t got = ZSTD_decompress(tar.data(), tar.size(), plaintext->data(),
++                               plaintext->size());
++  ASSERT_FALSE(ZSTD_isError(got));
++  ASSERT_EQ(got, tar.size());
++
++  // Verify first ustar entry is MANIFEST.json.
++  ASSERT_GE(tar.size(), 512u);
++  std::string first_name(reinterpret_cast<const char*>(tar.data()), 13);
++  EXPECT_EQ(first_name, std::string("MANIFEST.json"));
++  // ustar magic at offset 257.
++  ASSERT_GE(tar.size(), 257u + 5u);
++  EXPECT_EQ(0, std::memcmp(tar.data() + 257, "ustar", 5));
++}
++
++TEST(BundleWriterTest, WrongPassphraseFailsAead) {
++  BundleWriter writer;
++  std::string content = "secret";
++  ASSERT_TRUE(writer.AddFile(
++      "Bookmarks",
++      base::span<const uint8_t>(
++          reinterpret_cast<const uint8_t*>(content.data()), content.size())));
++  std::vector<uint8_t> bundle = writer.WriteToBytes("right");
++  ASSERT_FALSE(bundle.empty());
++
++  base::span<const uint8_t> bspan(bundle.data(), bundle.size());
++  base::span<const uint8_t> header = bspan.first(0x45u);
++  base::span<const uint8_t> salt = header.subspan(21u, 16u);
++  base::span<const uint8_t> nonce = header.subspan(37u, 24u);
++  base::span<const uint8_t> ct_and_tag = bspan.subspan(0x45u);
++
++  std::string wrong = "wrong";
++  base::span<const uint8_t> pw_span(
++      reinterpret_cast<const uint8_t*>(wrong.data()), wrong.size());
++  auto key = DeriveKey(pw_span, salt, kDefaultKdfParams);
++  ASSERT_TRUE(key.has_value());
++  auto plaintext = AeadOpen(*key, nonce, header, ct_and_tag);
++  EXPECT_FALSE(plaintext.has_value());
++}
++
++}  // namespace
++}  // namespace phlink::portability
+-- 
+2.50.1 (Apple Git-155)
+

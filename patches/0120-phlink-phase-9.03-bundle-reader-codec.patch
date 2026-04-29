@@ -1,0 +1,477 @@
+From 8ae4f4582cb4a5cdb28c1504bd4bdc49ddc52b4d Mon Sep 17 00:00:00 2001
+From: phlink <phlink@local>
+Date: Wed, 29 Apr 2026 21:46:42 +0530
+Subject: [PATCH] phlink: phase 9 plan 09-03 BundleReader codec + round-trip
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Adds chrome/browser/phlink/portability/bundle_reader.{h,cc} — the codec
+half of the .phlinkbundle import pipeline:
+
+- Verifies magic 'PHLB', format_version <= kSupportedMaxFormatVersion,
+  KDF/AEAD ids, salt length, declared payload length.
+- Derives the AEAD key with the bundle-specified Argon2id params (so a
+  v1 reader does not need to know v2 defaults to import a v2 bundle that
+  still uses Argon2id).
+- AEAD-opens with the 69-byte header bound as AAD.
+- zstd-decompresses, then walks the embedded ustar archive into
+  manifest_ + entries_.
+- Returns one of {kBadMagic, kUnsupportedVersion, kUnknownPrimitive,
+  kBadPassphrase, kIntegrity, kTruncated, kIo, kOk}, mirroring
+  docs/dev/profile-bundle-format.md §7.
+
+Six unit tests cover the writer↔reader round-trip plus the five negative
+paths (bad magic, truncation, wrong passphrase, unsupported version,
+single-bit ciphertext tamper -> AEAD-tag rejection).
+
+The import_service / Profile creation hookup / Import-card WebUI bits
+enumerated in plan 09-03 are deferred to a follow-up sub-plan; this
+patch lands the security-critical, format-validating piece in
+isolation.
+---
+ chrome/browser/phlink/portability/BUILD.gn    |   6 +-
+ .../phlink/portability/bundle_reader.cc       | 200 ++++++++++++++++++
+ .../phlink/portability/bundle_reader.h        |  74 +++++++
+ .../portability/bundle_reader_unittest.cc     | 108 ++++++++++
+ 4 files changed, 387 insertions(+), 1 deletion(-)
+ create mode 100644 chrome/browser/phlink/portability/bundle_reader.cc
+ create mode 100644 chrome/browser/phlink/portability/bundle_reader.h
+ create mode 100644 chrome/browser/phlink/portability/bundle_reader_unittest.cc
+
+diff --git a/chrome/browser/phlink/portability/BUILD.gn b/chrome/browser/phlink/portability/BUILD.gn
+index f3c2d0a55c713..edcbc7ef8d203 100644
+--- a/chrome/browser/phlink/portability/BUILD.gn
++++ b/chrome/browser/phlink/portability/BUILD.gn
+@@ -31,9 +31,11 @@ source_set("phlink_crypto") {
+ }
+ 
+ # Bundle codec. The writer (plan 09-02) packs profile bytes into a sealed
+-# `.phlinkbundle`; the reader counterpart lands in plan 09-03.
++# `.phlinkbundle`; the reader (plan 09-03) verifies and unseals it.
+ source_set("bundle_codec") {
+   sources = [
++    "bundle_reader.cc",
++    "bundle_reader.h",
+     "bundle_writer.cc",
+     "bundle_writer.h",
+   ]
+@@ -42,6 +44,7 @@ source_set("bundle_codec") {
+     "//base",
+     "//crypto",
+     "//third_party/zstd:compress",
++    "//third_party/zstd:decompress",
+     "//third_party/zstd:headers",
+   ]
+ }
+@@ -49,6 +52,7 @@ source_set("bundle_codec") {
+ source_set("unit_tests") {
+   testonly = true
+   sources = [
++    "bundle_reader_unittest.cc",
+     "bundle_writer_unittest.cc",
+     "phlink_crypto_unittest.cc",
+   ]
+diff --git a/chrome/browser/phlink/portability/bundle_reader.cc b/chrome/browser/phlink/portability/bundle_reader.cc
+new file mode 100644
+index 0000000000000..da5496ea8476f
+--- /dev/null
++++ b/chrome/browser/phlink/portability/bundle_reader.cc
+@@ -0,0 +1,200 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/phlink/portability/bundle_reader.h"
++
++#include <array>
++#include <cstring>
++#include <optional>
++#include <string>
++#include <vector>
++
++#include "base/files/file_util.h"
++#include "chrome/browser/phlink/portability/phlink_crypto.h"
++#include "third_party/zstd/src/lib/zstd.h"
++
++namespace phlink::portability {
++
++namespace {
++
++constexpr size_t kHeaderLen = 0x45;  // 69 bytes — see profile-bundle-format.md.
++constexpr size_t kSaltLen = 16;
++constexpr size_t kNonceLen = 24;
++constexpr size_t kTagLen = 16;
++
++template <typename T>
++T ReadLE(base::span<const uint8_t> buf, size_t off) {
++  T v = 0;
++  for (size_t i = 0; i < sizeof(T); ++i) {
++    v |= static_cast<T>(buf[off + i]) << (8 * i);
++  }
++  return v;
++}
++
++// Parses an octal NUL/space-padded ustar field of length `len`.
++std::optional<uint64_t> ParseOctal(base::span<const uint8_t> field) {
++  uint64_t v = 0;
++  for (uint8_t c : field) {
++    if (c == 0 || c == ' ') {
++      break;
++    }
++    if (c < '0' || c > '7') {
++      return std::nullopt;
++    }
++    v = (v << 3) | static_cast<uint64_t>(c - '0');
++  }
++  return v;
++}
++
++}  // namespace
++
++BundleReader::BundleReader() = default;
++BundleReader::~BundleReader() = default;
++
++BundleReader::Status BundleReader::Open(
++    base::span<const uint8_t> bundle_bytes, std::string_view passphrase) {
++  // 1. Header presence + magic.
++  if (bundle_bytes.size() < kHeaderLen + kTagLen) {
++    return Status::kTruncated;
++  }
++  if (bundle_bytes[0] != 'P' || bundle_bytes[1] != 'H' ||
++      bundle_bytes[2] != 'L' || bundle_bytes[3] != 'B') {
++    return Status::kBadMagic;
++  }
++
++  // 2. Version + primitive ids.
++  uint16_t version = ReadLE<uint16_t>(bundle_bytes, 4);
++  if (version > kSupportedMaxFormatVersion) {
++    return Status::kUnsupportedVersion;
++  }
++  uint8_t kdf_id = bundle_bytes[6];
++  uint8_t aead_id = bundle_bytes[7];
++  if (kdf_id != 1 || aead_id != 1) {
++    return Status::kUnknownPrimitive;
++  }
++
++  // 3. KDF params.
++  KdfParams params{
++      .m_kib = ReadLE<uint32_t>(bundle_bytes, 8),
++      .t = ReadLE<uint32_t>(bundle_bytes, 12),
++      .p = ReadLE<uint32_t>(bundle_bytes, 16),
++  };
++
++  // 4. Salt + nonce.
++  uint8_t salt_len = bundle_bytes[20];
++  if (salt_len != kSaltLen) {
++    return Status::kUnknownPrimitive;
++  }
++  base::span<const uint8_t> header = bundle_bytes.first(kHeaderLen);
++  base::span<const uint8_t> salt = header.subspan(21u, kSaltLen);
++  base::span<const uint8_t> nonce = header.subspan(37u, kNonceLen);
++
++  // 5. Payload length sanity.
++  uint64_t payload_len = ReadLE<uint64_t>(bundle_bytes, 0x3D);
++  if (bundle_bytes.size() != kHeaderLen + payload_len + kTagLen) {
++    return Status::kTruncated;
++  }
++  base::span<const uint8_t> ct_and_tag = bundle_bytes.subspan(kHeaderLen);
++
++  // 6. KDF.
++  base::span<const uint8_t> pw_span(
++      reinterpret_cast<const uint8_t*>(passphrase.data()), passphrase.size());
++  auto key = DeriveKey(pw_span, salt, params);
++  if (!key.has_value()) {
++    return Status::kUnknownPrimitive;
++  }
++
++  // 7. AEAD open.
++  auto plaintext = AeadOpen(*key, nonce, header, ct_and_tag);
++  if (!plaintext.has_value()) {
++    return Status::kBadPassphrase;
++  }
++
++  // 8. zstd-decompress.
++  unsigned long long expected =
++      ZSTD_getFrameContentSize(plaintext->data(), plaintext->size());
++  if (expected == ZSTD_CONTENTSIZE_ERROR ||
++      expected == ZSTD_CONTENTSIZE_UNKNOWN) {
++    return Status::kIntegrity;
++  }
++  std::vector<uint8_t> tar(static_cast<size_t>(expected));
++  size_t got = ZSTD_decompress(tar.data(), tar.size(), plaintext->data(),
++                               plaintext->size());
++  if (ZSTD_isError(got) || got != tar.size()) {
++    return Status::kIntegrity;
++  }
++
++  // 9. Parse ustar.
++  return ParseTar(tar);
++}
++
++BundleReader::Status BundleReader::OpenFile(const base::FilePath& path,
++                                            std::string_view passphrase) {
++  std::string buf;
++  if (!base::ReadFileToString(path, &buf)) {
++    return Status::kIo;
++  }
++  base::span<const uint8_t> bytes(
++      reinterpret_cast<const uint8_t*>(buf.data()), buf.size());
++  return Open(bytes, passphrase);
++}
++
++BundleReader::Status BundleReader::ParseTar(base::span<const uint8_t> tar) {
++  size_t off = 0;
++  while (off + 512 <= tar.size()) {
++    base::span<const uint8_t> hdr = tar.subspan(off, 512u);
++
++    // Two consecutive zero blocks terminate the archive.
++    bool all_zero = true;
++    for (uint8_t b : hdr) {
++      if (b != 0) {
++        all_zero = false;
++        break;
++      }
++    }
++    if (all_zero) {
++      break;
++    }
++
++    // ustar magic at offset 257.
++    if (std::memcmp(hdr.data() + 257, "ustar", 5) != 0) {
++      return Status::kIntegrity;
++    }
++
++    // name [0..100). NUL-terminated.
++    size_t name_len = 0;
++    while (name_len < 100 && hdr[name_len] != 0) {
++      ++name_len;
++    }
++    std::string name(reinterpret_cast<const char*>(hdr.data()), name_len);
++
++    // size [124..136), 12-byte octal.
++    auto size_opt = ParseOctal(hdr.subspan(124u, 12u));
++    if (!size_opt.has_value()) {
++      return Status::kIntegrity;
++    }
++    uint64_t size = *size_opt;
++
++    off += 512;
++    if (off + size > tar.size()) {
++      return Status::kTruncated;
++    }
++    base::span<const uint8_t> contents = tar.subspan(off, size);
++    if (name == "MANIFEST.json") {
++      manifest_.assign(contents.begin(), contents.end());
++    } else {
++      entries_[name] = std::vector<uint8_t>(contents.begin(), contents.end());
++    }
++    off += size;
++    // pad to 512-byte boundary
++    size_t pad = (512 - (size % 512)) % 512;
++    off += pad;
++  }
++  if (manifest_.empty()) {
++    return Status::kIntegrity;
++  }
++  return Status::kOk;
++}
++
++}  // namespace phlink::portability
+diff --git a/chrome/browser/phlink/portability/bundle_reader.h b/chrome/browser/phlink/portability/bundle_reader.h
+new file mode 100644
+index 0000000000000..e3fbdc2e01325
+--- /dev/null
++++ b/chrome/browser/phlink/portability/bundle_reader.h
+@@ -0,0 +1,74 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_PHLINK_PORTABILITY_BUNDLE_READER_H_
++#define CHROME_BROWSER_PHLINK_PORTABILITY_BUNDLE_READER_H_
++
++#include <array>
++#include <cstdint>
++#include <map>
++#include <string>
++#include <string_view>
++#include <vector>
++
++#include "base/containers/span.h"
++#include "base/files/file_path.h"
++
++namespace phlink::portability {
++
++// Reader counterpart of BundleWriter. Verifies the phlink bundle header,
++// derives the AEAD key from the user passphrase, decrypts + decompresses the
++// payload, and exposes the tar entries by virtual path.
++//
++// Mirrors docs/dev/profile-bundle-format.md §6 / §7.
++class BundleReader {
++ public:
++  // Mirrors §7 of the format spec.
++  enum class Status {
++    kOk,
++    kBadMagic,
++    kUnsupportedVersion,
++    kUnknownPrimitive,
++    kBadPassphrase,
++    kIntegrity,
++    kTruncated,
++    kIo,
++  };
++
++  BundleReader();
++  ~BundleReader();
++
++  BundleReader(const BundleReader&) = delete;
++  BundleReader& operator=(const BundleReader&) = delete;
++
++  // Loads + decrypts the bundle bytes. Must be called once before any of the
++  // accessors below.
++  Status Open(base::span<const uint8_t> bundle_bytes,
++              std::string_view passphrase);
++
++  // Convenience: read `path` from disk into memory and call `Open`.
++  Status OpenFile(const base::FilePath& path, std::string_view passphrase);
++
++  // Returns the parsed `MANIFEST.json` bytes. Empty until Open succeeds.
++  base::span<const uint8_t> Manifest() const { return manifest_; }
++
++  // Returns the tar entries by path (excluding `MANIFEST.json`).
++  const std::map<std::string, std::vector<uint8_t>>& Entries() const {
++    return entries_;
++  }
++
++  // Highest format_version this reader can decode.
++  static constexpr uint16_t kSupportedMaxFormatVersion = 1;
++
++ private:
++  // Parses the inner ustar archive into manifest_ + entries_.
++  Status ParseTar(base::span<const uint8_t> tar);
++
++  std::vector<uint8_t> manifest_;
++  std::map<std::string, std::vector<uint8_t>> entries_;
++};
++
++}  // namespace phlink::portability
++
++#endif  // CHROME_BROWSER_PHLINK_PORTABILITY_BUNDLE_READER_H_
+diff --git a/chrome/browser/phlink/portability/bundle_reader_unittest.cc b/chrome/browser/phlink/portability/bundle_reader_unittest.cc
+new file mode 100644
+index 0000000000000..78e1c83c8cb16
+--- /dev/null
++++ b/chrome/browser/phlink/portability/bundle_reader_unittest.cc
+@@ -0,0 +1,108 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/phlink/portability/bundle_reader.h"
++
++#include <string>
++#include <vector>
++
++#include "chrome/browser/phlink/portability/bundle_writer.h"
++#include "testing/gtest/include/gtest/gtest.h"
++
++namespace phlink::portability {
++namespace {
++
++base::span<const uint8_t> StringSpan(const std::string& s) {
++  return base::span<const uint8_t>(
++      reinterpret_cast<const uint8_t*>(s.data()), s.size());
++}
++
++TEST(BundleReaderTest, RoundTripWriterReader) {
++  BundleWriter writer;
++  std::string a = "alpha bytes";
++  std::string b = R"({"theme":"dark"})";
++  ASSERT_TRUE(writer.AddFile("Bookmarks", StringSpan(a)));
++  ASSERT_TRUE(writer.AddFile("Preferences", StringSpan(b)));
++
++  std::string passphrase = "correct horse battery staple";
++  std::vector<uint8_t> bundle = writer.WriteToBytes(passphrase);
++  ASSERT_FALSE(bundle.empty());
++
++  BundleReader reader;
++  ASSERT_EQ(reader.Open(bundle, passphrase), BundleReader::Status::kOk);
++
++  // Manifest non-empty and JSON-ish.
++  ASSERT_FALSE(reader.Manifest().empty());
++
++  const auto& entries = reader.Entries();
++  ASSERT_EQ(entries.size(), 2u);
++  ASSERT_TRUE(entries.count("Bookmarks"));
++  ASSERT_TRUE(entries.count("Preferences"));
++
++  std::string got_a(entries.at("Bookmarks").begin(),
++                    entries.at("Bookmarks").end());
++  std::string got_b(entries.at("Preferences").begin(),
++                    entries.at("Preferences").end());
++  EXPECT_EQ(got_a, a);
++  EXPECT_EQ(got_b, b);
++}
++
++TEST(BundleReaderTest, BadMagicRejected) {
++  std::vector<uint8_t> bytes(128, 0);
++  bytes[0] = 'X';
++  BundleReader reader;
++  EXPECT_EQ(reader.Open(bytes, "x"), BundleReader::Status::kBadMagic);
++}
++
++TEST(BundleReaderTest, TruncatedRejected) {
++  BundleWriter writer;
++  std::string s = "x";
++  ASSERT_TRUE(writer.AddFile("Bookmarks", StringSpan(s)));
++  std::vector<uint8_t> bundle = writer.WriteToBytes("pw");
++  ASSERT_FALSE(bundle.empty());
++  bundle.pop_back();  // chop the last tag byte
++  BundleReader reader;
++  EXPECT_EQ(reader.Open(bundle, "pw"), BundleReader::Status::kTruncated);
++}
++
++TEST(BundleReaderTest, WrongPassphraseRejected) {
++  BundleWriter writer;
++  std::string s = "secret";
++  ASSERT_TRUE(writer.AddFile("Bookmarks", StringSpan(s)));
++  std::vector<uint8_t> bundle = writer.WriteToBytes("right");
++  ASSERT_FALSE(bundle.empty());
++  BundleReader reader;
++  EXPECT_EQ(reader.Open(bundle, "wrong"),
++            BundleReader::Status::kBadPassphrase);
++}
++
++TEST(BundleReaderTest, UnsupportedVersionRejected) {
++  BundleWriter writer;
++  std::string s = "x";
++  ASSERT_TRUE(writer.AddFile("Bookmarks", StringSpan(s)));
++  std::vector<uint8_t> bundle = writer.WriteToBytes("pw");
++  ASSERT_FALSE(bundle.empty());
++  // Bump format_version (offset 4..6).
++  bundle[4] = 0x99;
++  bundle[5] = 0x00;
++  BundleReader reader;
++  EXPECT_EQ(reader.Open(bundle, "pw"),
++            BundleReader::Status::kUnsupportedVersion);
++}
++
++TEST(BundleReaderTest, TamperedCiphertextRejected) {
++  BundleWriter writer;
++  std::string s = "x";
++  ASSERT_TRUE(writer.AddFile("Bookmarks", StringSpan(s)));
++  std::vector<uint8_t> bundle = writer.WriteToBytes("pw");
++  ASSERT_FALSE(bundle.empty());
++  // Flip a bit inside the ciphertext.
++  bundle[0x45] ^= 0x01;
++  BundleReader reader;
++  EXPECT_EQ(reader.Open(bundle, "pw"),
++            BundleReader::Status::kBadPassphrase);  // AEAD tag check fails
++}
++
++}  // namespace
++}  // namespace phlink::portability
+-- 
+2.50.1 (Apple Git-155)
+
