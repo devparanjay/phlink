@@ -1,0 +1,319 @@
+From 6e4a330629e830cdb3379df60aa493f176d0f10e Mon Sep 17 00:00:00 2001
+From: phlink <dev@phlink.local>
+Date: Thu, 30 Apr 2026 00:54:20 +0530
+Subject: [PATCH] phlink: phase 10.06 UpdaterServiceFactory + KeyedService
+
+Two small changes to make UpdaterService consumable from the rest of
+the browser without having to plumb it through ProfileImpl:
+
+  1. UpdaterService now inherits from KeyedService (single virtual
+     ~Shutdown method, no behavior change; ~UpdaterService is now
+     'override').
+
+  2. New UpdaterServiceFactory (ProfileKeyedServiceFactory):
+       - GetForProfile(Profile*) -> UpdaterService*
+       - GetInstance() singleton via base::NoDestructor.
+       - EnsureFactoryBuilt() so the future settings WebUI handler
+         (10-06b) can opt-in once at startup without us having to
+         touch chrome_browser_main_extra_parts_profiles.cc (huge,
+         rebase-fragile).
+       - ProfileSelections: regular-original-only; guest / system /
+         ash-internals all kNone.
+       - ServiceIsCreatedWithBrowserContext = false (lazy).
+       - BuildServiceInstanceForBrowserContext binds a no-op
+         CheckCallback for now; the real wiring of
+         UpdateCheckPipeline::Run (which already exists per 10-02e)
+         happens in the follow-up that adds the chrome://settings/help
+         WebUI integration.
+       - Updater prefs live in local state, not profile prefs;
+         RegisterProfilePrefs is intentionally empty.
+
+Tests: factory singleton invariant + EnsureFactoryBuilt idempotence.
+Profile-keyed selection itself is exercised by Chromium's own
+keyed-service test infrastructure; we don't duplicate TestingProfile
+plumbing here.
+
+32/32 phlink_updater_unittests pass; chrome builds + codesigns.
+Refs phlink phase 10-06.
+---
+ chrome/browser/phlink/updater/BUILD.gn        | 22 +++++
+ .../browser/phlink/updater/updater_service.h  |  5 +-
+ .../phlink/updater/updater_service_factory.cc | 89 +++++++++++++++++++
+ .../phlink/updater/updater_service_factory.h  | 53 +++++++++++
+ .../updater_service_factory_unittest.cc       | 31 +++++++
+ 5 files changed, 198 insertions(+), 2 deletions(-)
+ create mode 100644 chrome/browser/phlink/updater/updater_service_factory.cc
+ create mode 100644 chrome/browser/phlink/updater/updater_service_factory.h
+ create mode 100644 chrome/browser/phlink/updater/updater_service_factory_unittest.cc
+
+diff --git a/chrome/browser/phlink/updater/BUILD.gn b/chrome/browser/phlink/updater/BUILD.gn
+index 2a0d9f40d1b66..15589421babb1 100644
+--- a/chrome/browser/phlink/updater/BUILD.gn
++++ b/chrome/browser/phlink/updater/BUILD.gn
+@@ -58,6 +58,26 @@ source_set("service") {
+   deps = [
+     ":scheduler",
+     "//base",
++    "//components/keyed_service/core",
++    "//components/prefs",
++  ]
++}
++
++# Profile-keyed factory for UpdaterService. Not registered from
++# chrome_browser_main_extra_parts_profiles.cc; callers must
++# EnsureFactoryBuilt() once (the future settings WebUI handler in
++# plan 10-06b will do that).
++source_set("service_factory") {
++  sources = [
++    "updater_service_factory.cc",
++    "updater_service_factory.h",
++  ]
++  deps = [
++    ":service",
++    "//base",
++    "//chrome/browser:browser_process",
++    "//chrome/browser/profiles:profile",
++    "//components/keyed_service/content",
+     "//components/prefs",
+   ]
+ }
+@@ -169,6 +189,7 @@ source_set("unit_tests") {
+     "staged_payload_unittest.cc",
+     "update_check_pipeline_unittest.cc",
+     "update_check_scheduler_unittest.cc",
++    "updater_service_factory_unittest.cc",
+     "updater_service_unittest.cc",
+   ]
+   deps = [
+@@ -178,6 +199,7 @@ source_set("unit_tests") {
+     ":payload_fetcher",
+     ":scheduler",
+     ":service",
++    ":service_factory",
+     ":staged_payload",
+     ":test_helpers",
+     ":update_check_pipeline",
+diff --git a/chrome/browser/phlink/updater/updater_service.h b/chrome/browser/phlink/updater/updater_service.h
+index 4afd74b3aa7d2..3907339702761 100644
+--- a/chrome/browser/phlink/updater/updater_service.h
++++ b/chrome/browser/phlink/updater/updater_service.h
+@@ -12,6 +12,7 @@
+ #include "base/time/time.h"
+ #include "base/timer/wall_clock_timer.h"
+ #include "chrome/browser/phlink/updater/update_check_scheduler.h"
++#include "components/keyed_service/core/keyed_service.h"
+ 
+ class PrefRegistrySimple;
+ class PrefService;
+@@ -31,7 +32,7 @@ namespace phlink::updater {
+ //
+ // Construction does not start the timer. Callers should invoke `Start()`
+ // after registering the prefs (`RegisterProfilePrefs`).
+-class UpdaterService {
++class UpdaterService : public KeyedService {
+  public:
+   // Invoked on the same sequence as `UpdaterService` whenever a check is
+   // due. The implementation is expected to perform the metadata + payload
+@@ -46,7 +47,7 @@ class UpdaterService {
+   UpdaterService(PrefService* prefs, CheckCallback check_callback);
+   UpdaterService(const UpdaterService&) = delete;
+   UpdaterService& operator=(const UpdaterService&) = delete;
+-  ~UpdaterService();
++  ~UpdaterService() override;
+ 
+   // Start the timer. No-op if already running. Safe to call repeatedly
+   // (e.g. after toggling the auto-check pref back to true).
+diff --git a/chrome/browser/phlink/updater/updater_service_factory.cc b/chrome/browser/phlink/updater/updater_service_factory.cc
+new file mode 100644
+index 0000000000000..4679c85e6de3a
+--- /dev/null
++++ b/chrome/browser/phlink/updater/updater_service_factory.cc
+@@ -0,0 +1,89 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/phlink/updater/updater_service_factory.h"
++
++#include "base/functional/bind.h"
++#include "base/logging.h"
++#include "base/no_destructor.h"
++#include "chrome/browser/browser_process.h"
++#include "chrome/browser/phlink/updater/updater_service.h"
++#include "chrome/browser/profiles/profile.h"
++#include "components/prefs/pref_service.h"
++
++namespace phlink::updater {
++
++namespace {
++
++// No-op production CheckCallback. Phase 10-06b will replace this with
++// `UpdateCheckPipeline::Run` once the settings WebUI handler is in
++// place; the pipeline + helpers already exist (10-02e / 10-03 / 04 /
++// 05) but binding them at factory time would require a profile-scoped
++// SharedURLLoaderFactory and trust-pinned root.json which we don't
++// want to plumb until there's a user-visible "Check for updates"
++// button.
++void NoopCheck() {
++  VLOG(1) << "phlink updater: scheduled tick (no-op stub).";
++}
++
++}  // namespace
++
++// static
++UpdaterService* UpdaterServiceFactory::GetForProfile(Profile* profile) {
++  return static_cast<UpdaterService*>(
++      GetInstance()->GetServiceForBrowserContext(profile, /*create=*/true));
++}
++
++// static
++UpdaterServiceFactory* UpdaterServiceFactory::GetInstance() {
++  static base::NoDestructor<UpdaterServiceFactory> instance;
++  return instance.get();
++}
++
++// static
++void UpdaterServiceFactory::EnsureFactoryBuilt() {
++  GetInstance();
++}
++
++UpdaterServiceFactory::UpdaterServiceFactory()
++    : ProfileKeyedServiceFactory(
++          "PhlinkUpdaterService",
++          ProfileSelections::Builder()
++              .WithRegular(ProfileSelection::kOriginalOnly)
++              .WithGuest(ProfileSelection::kNone)
++              .WithSystem(ProfileSelection::kNone)
++              .WithAshInternals(ProfileSelection::kNone)
++              .Build()) {}
++
++UpdaterServiceFactory::~UpdaterServiceFactory() = default;
++
++std::unique_ptr<KeyedService>
++UpdaterServiceFactory::BuildServiceInstanceForBrowserContext(
++    content::BrowserContext* context) const {
++  PrefService* local_state = g_browser_process->local_state();
++  if (!local_state) {
++    return nullptr;
++  }
++  auto service = std::make_unique<UpdaterService>(
++      local_state, base::BindRepeating(&NoopCheck));
++  service->Start();
++  return service;
++}
++
++void UpdaterServiceFactory::RegisterProfilePrefs(
++    user_prefs::PrefRegistrySyncable* registry) {
++  // Updater prefs live in local state, not profile prefs; nothing to
++  // register here. Local-state registration happens in
++  // ChromeBrowserMainExtraPartsProfiles via UpdaterService::RegisterPrefs
++  // (deferred to 10-06b).
++}
++
++bool UpdaterServiceFactory::ServiceIsCreatedWithBrowserContext() const {
++  // Lazy: only built when GetForProfile() is called. The settings WebUI
++  // handler will trigger that the first time a user opens the Help
++  // page.
++  return false;
++}
++
++}  // namespace phlink::updater
+diff --git a/chrome/browser/phlink/updater/updater_service_factory.h b/chrome/browser/phlink/updater/updater_service_factory.h
+new file mode 100644
+index 0000000000000..a89d23d01a3ae
+--- /dev/null
++++ b/chrome/browser/phlink/updater/updater_service_factory.h
+@@ -0,0 +1,53 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_PHLINK_UPDATER_UPDATER_SERVICE_FACTORY_H_
++#define CHROME_BROWSER_PHLINK_UPDATER_UPDATER_SERVICE_FACTORY_H_
++
++#include "base/no_destructor.h"
++#include "chrome/browser/profiles/profile_keyed_service_factory.h"
++
++class Profile;
++
++namespace phlink::updater {
++
++class UpdaterService;
++
++// One UpdaterService per regular Profile. Off-the-record / Guest /
++// System profiles get nullptr (we never run an updater on them).
++//
++// The factory is *not* registered from
++// chrome_browser_main_extra_parts_profiles.cc on purpose -- that file
++// is huge and rebase-fragile. Callers that need the service (e.g. the
++// future settings WebUI handler) must call EnsureFactoryBuilt() once
++// per process before GetForProfile().
++class UpdaterServiceFactory : public ProfileKeyedServiceFactory {
++ public:
++  static UpdaterService* GetForProfile(Profile* profile);
++  static UpdaterServiceFactory* GetInstance();
++
++  // Idempotent: forces the factory to be created so that profile
++  // teardown will clean it up. Tests call this in SetUp().
++  static void EnsureFactoryBuilt();
++
++  UpdaterServiceFactory(const UpdaterServiceFactory&) = delete;
++  UpdaterServiceFactory& operator=(const UpdaterServiceFactory&) = delete;
++
++ private:
++  friend class base::NoDestructor<UpdaterServiceFactory>;
++
++  UpdaterServiceFactory();
++  ~UpdaterServiceFactory() override;
++
++  // BrowserContextKeyedServiceFactory:
++  std::unique_ptr<KeyedService> BuildServiceInstanceForBrowserContext(
++      content::BrowserContext* context) const override;
++  void RegisterProfilePrefs(
++      user_prefs::PrefRegistrySyncable* registry) override;
++  bool ServiceIsCreatedWithBrowserContext() const override;
++};
++
++}  // namespace phlink::updater
++
++#endif  // CHROME_BROWSER_PHLINK_UPDATER_UPDATER_SERVICE_FACTORY_H_
+diff --git a/chrome/browser/phlink/updater/updater_service_factory_unittest.cc b/chrome/browser/phlink/updater/updater_service_factory_unittest.cc
+new file mode 100644
+index 0000000000000..b68495a6701bd
+--- /dev/null
++++ b/chrome/browser/phlink/updater/updater_service_factory_unittest.cc
+@@ -0,0 +1,31 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/phlink/updater/updater_service_factory.h"
++
++#include "testing/gtest/include/gtest/gtest.h"
++
++namespace phlink::updater {
++namespace {
++
++// Smoke test: the factory can be obtained, is a singleton, and
++// EnsureFactoryBuilt is idempotent. Profile-keyed behavior (regular
++// vs OTR vs guest) is enforced by ProfileKeyedServiceFactory itself
++// and is exercised by Chromium's own keyed-service tests; we don't
++// duplicate them here to keep the unit-test target standalone (no
++// TestingProfile dependency).
++TEST(UpdaterServiceFactoryTest, IsSingleton) {
++  auto* a = UpdaterServiceFactory::GetInstance();
++  auto* b = UpdaterServiceFactory::GetInstance();
++  EXPECT_EQ(a, b);
++}
++
++TEST(UpdaterServiceFactoryTest, EnsureFactoryBuiltIsIdempotent) {
++  UpdaterServiceFactory::EnsureFactoryBuilt();
++  UpdaterServiceFactory::EnsureFactoryBuilt();
++  EXPECT_NE(nullptr, UpdaterServiceFactory::GetInstance());
++}
++
++}  // namespace
++}  // namespace phlink::updater
+-- 
+2.50.1 (Apple Git-155)
+
