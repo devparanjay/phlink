@@ -14,7 +14,7 @@
 #                        ad-hoc signing (`-`) which produces an unsigned-for-distribution
 #                        dmg suitable only for local smoke tests.
 #
-# The output is `<out-dir>/phlink-<version>-mac-arm64.dmg`. This script
+# The output is `dist/phlink-<version>-mac-arm64.dmg`. This script
 # does NOT notarize -- notarization is a separate CI step (10-08).
 
 set -euo pipefail
@@ -30,7 +30,8 @@ IDENTITY="${3:--}"
 
 APP="${OUT_DIR}/phlink.app"
 HELPER="${OUT_DIR}/phlink_update_helper"
-DMG_PATH="${OUT_DIR}/phlink-${VERSION}-mac-arm64.dmg"
+DIST_DIR="dist"
+DMG_PATH="${DIST_DIR}/phlink-${VERSION}-mac-arm64.dmg"
 
 if [[ ! -d "${APP}" ]]; then
   echo "phlink.app not found at ${APP}; build chrome first." >&2
@@ -43,6 +44,7 @@ fi
 
 STAGE="$(mktemp -d -t phlink-dmg.XXXXXX)"
 trap 'rm -rf "${STAGE}"' EXIT
+mkdir -p "${DIST_DIR}"
 
 cp -R "${APP}" "${STAGE}/"
 mkdir -p "${STAGE}/phlink.app/Contents/Helpers"

@@ -1,0 +1,84 @@
+name: release-sign
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version, for example 0.1.0
+        required: true
+      package_run_id:
+        description: package-installers workflow run ID containing installer artifacts
+        required: true
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: release-sign-${{ github.ref }}-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  tuf-and-linux-signatures:
+    name: TUF metadata and Linux detached signatures
+    runs-on: ubuntu-22.04
+    environment: release-signing
+    steps:
+      - name: Checkout
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+
+      - name: Download installer artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.package_run_id }}
+        run: gh run download "$RUN_ID" --dir "$RUNNER_TEMP/packages"
+
+      - name: Flatten artifacts
+        run: |
+          mkdir -p "$RUNNER_TEMP/release-artifacts"
+          find "$RUNNER_TEMP/packages" -type f \
+            \( -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' \
+               -o -name '*.rpm' -o -name '*.msi' -o -name '*.exe' \
+               -o -name '*.zip' \) \
+            -exec cp '{}' "$RUNNER_TEMP/release-artifacts/" ';'
+          find "$RUNNER_TEMP/release-artifacts" -maxdepth 1 -type f -print
+
+      - name: Materialize signing keys
+        env:
+          PHLINK_TARGETS_KEY: ${{ secrets.PHLINK_TARGETS_KEY }}
+          PHLINK_SNAPSHOT_KEY: ${{ secrets.PHLINK_SNAPSHOT_KEY }}
+          PHLINK_TIMESTAMP_KEY: ${{ secrets.PHLINK_TIMESTAMP_KEY }}
+          PHLINK_GPG_SECRET: ${{ secrets.PHLINK_GPG_SECRET }}
+        run: |
+          test -n "$PHLINK_TARGETS_KEY"
+          test -n "$PHLINK_SNAPSHOT_KEY"
+          test -n "$PHLINK_TIMESTAMP_KEY"
+          test -n "$PHLINK_GPG_SECRET"
+          umask 077
+          printf '%s' "$PHLINK_TARGETS_KEY" > "$RUNNER_TEMP/targets.key"
+          printf '%s' "$PHLINK_SNAPSHOT_KEY" > "$RUNNER_TEMP/snapshot.key"
+          printf '%s' "$PHLINK_TIMESTAMP_KEY" > "$RUNNER_TEMP/timestamp.key"
+          printf '%s' "$PHLINK_GPG_SECRET" > "$RUNNER_TEMP/release.gpg.secret"
+
+      - name: Sign release metadata
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          scripts/release/sign-release.sh \
+            "$RUNNER_TEMP/release-artifacts" \
+            "$VERSION" \
+            "$RUNNER_TEMP/targets.key" \
+            "$RUNNER_TEMP/snapshot.key" \
+            "$RUNNER_TEMP/timestamp.key" \
+            "$RUNNER_TEMP/release.gpg.secret"
+
+      - name: Upload signed metadata
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: phlink-${{ inputs.version }}-signed-release-metadata
+          path: |
+            ${{ runner.temp }}/release-artifacts/targets.json
+            ${{ runner.temp }}/release-artifacts/snapshot.json
+            ${{ runner.temp }}/release-artifacts/timestamp.json
+            ${{ runner.temp }}/release-artifacts/*.sig
+          if-no-files-found: error

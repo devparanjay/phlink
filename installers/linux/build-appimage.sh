@@ -9,7 +9,7 @@
 #   installers/linux/build-appimage.sh <out-dir> <version>
 #
 # Requires: appimagetool, mksquashfs (linuxdeploy is optional).
-# Output:   <out-dir>/phlink-<version>-linux-x86_64.AppImage
+# Output:   dist/phlink-<version>-linux-x86_64.AppImage
 
 set -euo pipefail
 
@@ -20,7 +20,8 @@ fi
 
 OUT_DIR="$1"
 VERSION="$2"
-APPIMG_OUT="${OUT_DIR}/phlink-${VERSION}-linux-x86_64.AppImage"
+DIST_DIR="dist"
+APPIMG_OUT="${DIST_DIR}/phlink-${VERSION}-linux-x86_64.AppImage"
 
 if [[ ! -x "${OUT_DIR}/phlink" ]]; then
   echo "phlink binary not found at ${OUT_DIR}/phlink" >&2
@@ -33,6 +34,7 @@ fi
 
 APPDIR="$(mktemp -d -t phlink-appdir.XXXXXX)"
 trap 'rm -rf "${APPDIR}"' EXIT
+mkdir -p "${DIST_DIR}"
 
 mkdir -p "${APPDIR}/usr/bin" "${APPDIR}/usr/share/applications" \
          "${APPDIR}/usr/share/icons/hicolor/256x256/apps"

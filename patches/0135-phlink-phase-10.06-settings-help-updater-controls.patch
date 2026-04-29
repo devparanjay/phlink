@@ -1,0 +1,449 @@
+From 6221cd96426d2d940dda589cd95208437e833b67 Mon Sep 17 00:00:00 2001
+From: phlink <dev@phlink.local>
+Date: Thu, 30 Apr 2026 02:47:31 +0530
+Subject: [PATCH] phlink: phase 10.06 settings help updater controls
+
+Wire phlink updater state into chrome://settings/help without forking the settings page. Adds WebUI messages for reading updater status, toggling the auto-check local-state pref, and triggering a manual CheckNow path. The Check now command remains available even when automatic checks are disabled, matching the pref contract.
+
+Register updater local-state prefs during browser pref registration and add the service factory dependency needed by AboutHandler.
+
+Tests: autoninja -j 8 -C out/Default phlink_updater_unittests chrome; out/Default/phlink_updater_unittests; codesign --force --deep --sign - out/Default/phlink.app.
+
+Refs phlink phase 10-06.
+---
+ chrome/browser/prefs/browser_prefs.cc         |  2 +
+ .../settings/about_page/about_page.html       | 26 +++++
+ .../settings/about_page/about_page.ts         | 52 +++++++++-
+ .../about_page/about_page_browser_proxy.ts    | 32 +++++++
+ chrome/browser/ui/BUILD.gn                    |  1 +
+ .../ui/webui/settings/about_handler.cc        | 94 +++++++++++++++++++
+ .../browser/ui/webui/settings/about_handler.h |  7 ++
+ .../settings_localized_strings_provider.cc    | 13 +++
+ 8 files changed, 226 insertions(+), 1 deletion(-)
+
+diff --git a/chrome/browser/prefs/browser_prefs.cc b/chrome/browser/prefs/browser_prefs.cc
+index c660cdb1e0bb3..735a9b64e7701 100644
+--- a/chrome/browser/prefs/browser_prefs.cc
++++ b/chrome/browser/prefs/browser_prefs.cc
+@@ -55,6 +55,7 @@
+ #include "chrome/browser/permissions/quiet_notification_permission_ui_state.h"
+ #include "chrome/browser/phlink/adblock/phlink_adblock_prefs.h"
+ #include "chrome/browser/phlink/appearance/phlink_appearance_prefs.h"
++#include "chrome/browser/phlink/updater/updater_service.h"
+ #include "chrome/browser/platform_experience/prefs.h"
+ #include "chrome/browser/prefs/chrome_pref_service_factory.h"
+ #include "chrome/browser/prefs/incognito_mode_prefs.h"
+@@ -1403,6 +1404,7 @@ void RegisterLocalState(PrefRegistrySimple* registry) {
+   ExternalProtocolHandler::RegisterPrefs(registry);
+   flags_ui::PrefServiceFlagsStorage::RegisterPrefs(registry);
+   GpuModeManager::RegisterPrefs(registry);
++  phlink::updater::UpdaterService::RegisterPrefs(registry);
+   signin::IdentityManager::RegisterLocalStatePrefs(registry);
+   invalidation::PerUserTopicSubscriptionManager::RegisterPrefs(registry);
+   language::GeoLanguageProvider::RegisterLocalStatePrefs(registry);
+diff --git a/chrome/browser/resources/settings/about_page/about_page.html b/chrome/browser/resources/settings/about_page/about_page.html
+index 5069802bf7a17..1e8a5659bac7e 100644
+--- a/chrome/browser/resources/settings/about_page/about_page.html
++++ b/chrome/browser/resources/settings/about_page/about_page.html
+@@ -44,6 +44,10 @@
+       cr-button {
+         white-space: nowrap;
+       }
++
++      .phlink-update-row cr-button {
++        margin-inline-start: var(--cr-button-edge-spacing);
++      }
+     </style>
+     <settings-section page-title="$i18n{aboutPageTitle}">
+       <div class="cr-row two-line first">
+@@ -106,6 +110,28 @@
+         </span>
+ </if>
+       </div>
++      <div class="cr-row continuation phlink-update-row">
++        <div class="flex cr-padded-text">
++          <div>$i18n{phlinkUpdateTitle}</div>
++          <div class="secondary" aria-live="polite">
++            [[getPhlinkUpdateStatusMessage_(phlinkUpdateStatus_)]]
++          </div>
++        </div>
++        <cr-button id="phlinkCheckNow"
++            disabled="[[!phlinkUpdateStatus_.canCheck]]"
++            on-click="onPhlinkCheckNowClick_">
++          $i18n{phlinkUpdateCheckNow}
++        </cr-button>
++      </div>
++      <div class="cr-row continuation">
++        <div class="flex cr-padded-text">
++          <div>$i18n{phlinkUpdateAutoCheckLabel}</div>
++        </div>
++        <cr-toggle id="phlinkAutoUpdateToggle"
++            checked="[[phlinkUpdateStatus_.enabled]]"
++            on-change="onPhlinkAutoUpdateToggleChange_">
++        </cr-toggle>
++      </div>
+ <if expr="_google_chrome and is_macosx">
+       <template is="dom-if" if="[[!promoteUpdaterStatus_.hidden]]">
+         <div id="promoteUpdater"
+diff --git a/chrome/browser/resources/settings/about_page/about_page.ts b/chrome/browser/resources/settings/about_page/about_page.ts
+index aa3f435d831b0..6b22c4f4e0c62 100644
+--- a/chrome/browser/resources/settings/about_page/about_page.ts
++++ b/chrome/browser/resources/settings/about_page/about_page.ts
+@@ -17,8 +17,10 @@ import 'chrome://resources/cr_elements/cr_button/cr_button.js';
+ import 'chrome://resources/cr_elements/cr_icon_button/cr_icon_button.js';
+ import 'chrome://resources/cr_elements/cr_icon/cr_icon.js';
+ import 'chrome://resources/cr_elements/cr_link_row/cr_link_row.js';
++import 'chrome://resources/cr_elements/cr_toggle/cr_toggle.js';
+ import 'chrome://resources/cr_elements/icons.html.js';
+ import 'chrome://resources/cr_elements/cr_shared_style.css.js';
++import type {CrToggleElement} from 'chrome://resources/cr_elements/cr_toggle/cr_toggle.js';
+ 
+ import {I18nMixin} from 'chrome://resources/cr_elements/i18n_mixin.js';
+ import {WebUiListenerMixin} from 'chrome://resources/cr_elements/web_ui_listener_mixin.js';
+@@ -34,7 +36,11 @@ import {RelaunchMixin, RestartType} from '../relaunch_mixin.js';
+ import type {SettingsPlugin} from '../settings_main/settings_plugin.js';
+ 
+ import {getTemplate} from './about_page.html.js';
+-import type {AboutPageBrowserProxy, UpdateStatusChangedEvent} from './about_page_browser_proxy.js';
++import type {
++  AboutPageBrowserProxy,
++  PhlinkUpdateStatus,
++  UpdateStatusChangedEvent,
++} from './about_page_browser_proxy.js';
+ import {AboutPageBrowserProxyImpl, UpdateStatus} from './about_page_browser_proxy.js';
+ // clang-format off
+ // <if expr="_google_chrome and is_macosx">
+@@ -72,6 +78,15 @@ export class SettingsAboutPageElement extends SettingsAboutPageElementBase
+         },
+       },
+ 
++      phlinkUpdateStatus_: {
++        type: Object,
++        value: {
++          canCheck: false,
++          enabled: false,
++          status: 'unavailable',
++        },
++      },
++
+       /**
+        * Whether the browser/ChromeOS is managed by their organization
+        * through enterprise policies.
+@@ -136,6 +151,7 @@ export class SettingsAboutPageElement extends SettingsAboutPageElementBase
+   // </if>
+ 
+   declare private currentUpdateStatusEvent_: UpdateStatusChangedEvent|null;
++  declare private phlinkUpdateStatus_: PhlinkUpdateStatus;
+   declare private isManaged_: boolean;
+   declare private managedByIcon_: string;
+ 
+@@ -177,17 +193,26 @@ export class SettingsAboutPageElement extends SettingsAboutPageElementBase
+   private startListening_() {
+     this.addWebUiListener(
+         'update-status-changed', this.onUpdateStatusChanged_.bind(this));
++    this.addWebUiListener('phlink-update-status-changed',
++      this.onPhlinkUpdateStatusChanged_.bind(this));
+     // <if expr="_google_chrome and is_macosx">
+     this.addWebUiListener(
+         'promotion-state-changed',
+         this.onPromoteUpdaterStatusChanged_.bind(this));
+     // </if>
+     this.aboutBrowserProxy_.refreshUpdateStatus();
++    this.aboutBrowserProxy_.getPhlinkUpdateStatus().then(status => {
++      this.phlinkUpdateStatus_ = status;
++    });
+   }
+ 
+   private onUpdateStatusChanged_(event: UpdateStatusChangedEvent) {
+     this.currentUpdateStatusEvent_ = event;
+   }
++
++  private onPhlinkUpdateStatusChanged_(status: PhlinkUpdateStatus) {
++    this.phlinkUpdateStatus_ = status;
++  }
+   // </if>
+ 
+   // <if expr="_google_chrome and is_macosx">
+@@ -222,6 +247,31 @@ export class SettingsAboutPageElement extends SettingsAboutPageElementBase
+     this.performRestart(RestartType.RELAUNCH);
+   }
+ 
++  private onPhlinkCheckNowClick_() {
++    this.aboutBrowserProxy_.checkPhlinkUpdatesNow();
++  }
++
++  private onPhlinkAutoUpdateToggleChange_(event: Event) {
++    const toggle = event.target as CrToggleElement;
++    this.aboutBrowserProxy_.setPhlinkAutoCheckEnabled(toggle.checked)
++        .then(status => {
++          this.phlinkUpdateStatus_ = status;
++        });
++  }
++
++  private getPhlinkUpdateStatusMessage_(): string {
++    switch (this.phlinkUpdateStatus_.status) {
++      case 'checking':
++        return this.i18n('phlinkUpdateStatusChecking');
++      case 'disabled':
++        return this.i18n('phlinkUpdateStatusDisabled');
++      case 'updated':
++        return this.i18n('phlinkUpdateStatusUpToDate');
++      default:
++        return this.i18n('phlinkUpdateStatusUnavailable');
++    }
++  }
++
+   // <if expr="not is_chromeos">
+   private updateShowUpdateStatus_() {
+     if (this.obsoleteSystemInfo_.endOfLine) {
+diff --git a/chrome/browser/resources/settings/about_page/about_page_browser_proxy.ts b/chrome/browser/resources/settings/about_page/about_page_browser_proxy.ts
+index 10bea4664af53..f2bd8dc1503fa 100644
+--- a/chrome/browser/resources/settings/about_page/about_page_browser_proxy.ts
++++ b/chrome/browser/resources/settings/about_page/about_page_browser_proxy.ts
+@@ -7,6 +7,8 @@
+  * the browser.
+  */
+ 
++import {sendWithPromise} from 'chrome://resources/js/cr.js';
++
+ /**
+  * Enumeration of all possible update statuses. The string literals must match
+  * the ones defined at |AboutHandler::UpdateStatusToString|.
+@@ -43,6 +45,14 @@ export interface UpdateStatusChangedEvent {
+   size?: string;
+ }
+ 
++export interface PhlinkUpdateStatus {
++  status: string;
++  enabled: boolean;
++  canCheck: boolean;
++  lastCheckTime?: number;
++  nextCheckTime?: number;
++}
++
+ 
+ export interface AboutPageBrowserProxy {
+   /**
+@@ -59,6 +69,15 @@ export interface AboutPageBrowserProxy {
+   /** Opens the help page. */
+   openHelpPage(): void;
+ 
++  /** Reads phlink's local updater status and auto-check pref. */
++  getPhlinkUpdateStatus(): Promise<PhlinkUpdateStatus>;
++
++  /** Enables or disables phlink's automatic update checks. */
++  setPhlinkAutoCheckEnabled(enabled: boolean): Promise<PhlinkUpdateStatus>;
++
++  /** Triggers an immediate phlink update check. */
++  checkPhlinkUpdatesNow(): void;
++
+   // <if expr="_google_chrome">
+   /**
+    * Opens the feedback dialog.
+@@ -94,6 +113,19 @@ export class AboutPageBrowserProxyImpl implements AboutPageBrowserProxy {
+     chrome.send('openHelpPage');
+   }
+ 
++  getPhlinkUpdateStatus() {
++    return sendWithPromise<PhlinkUpdateStatus>('getPhlinkUpdateStatus');
++  }
++
++  setPhlinkAutoCheckEnabled(enabled: boolean) {
++    return sendWithPromise<PhlinkUpdateStatus>(
++        'setPhlinkAutoCheckEnabled', enabled);
++  }
++
++  checkPhlinkUpdatesNow() {
++    chrome.send('checkPhlinkUpdatesNow');
++  }
++
+   // <if expr="_google_chrome">
+   openFeedbackDialog() {
+     chrome.send('openFeedbackDialog');
+diff --git a/chrome/browser/ui/BUILD.gn b/chrome/browser/ui/BUILD.gn
+index 3d44f2248c4ca..80e9c36740e39 100644
+--- a/chrome/browser/ui/BUILD.gn
++++ b/chrome/browser/ui/BUILD.gn
+@@ -1771,6 +1771,7 @@ static_library("ui") {
+       "//chrome/browser/ui/views/toolbar",
+       "//chrome/browser/ui/views/toolbar:impl",
+       "//chrome/browser/ui/views/zoom",
++      "//chrome/browser/phlink/updater:service_factory",
+       "//chrome/browser/ui/webui:webui_util",
+       "//chrome/browser/ui/webui/actor_internals",
+       "//chrome/browser/ui/webui/app_management",
+diff --git a/chrome/browser/ui/webui/settings/about_handler.cc b/chrome/browser/ui/webui/settings/about_handler.cc
+index 567ce31f25a75..7bf81c8e9e998 100644
+--- a/chrome/browser/ui/webui/settings/about_handler.cc
++++ b/chrome/browser/ui/webui/settings/about_handler.cc
+@@ -27,6 +27,9 @@
+ #include "chrome/browser/browser_process.h"
+ #include "chrome/browser/chrome_content_browser_client.h"
+ #include "chrome/browser/enterprise/browser_management/management_service_factory.h"
++#include "chrome/browser/phlink/updater/pref_names.h"
++#include "chrome/browser/phlink/updater/updater_service.h"
++#include "chrome/browser/phlink/updater/updater_service_factory.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/ui/browser_commands.h"
+ #include "chrome/browser/ui/browser_finder.h"
+@@ -42,6 +45,7 @@
+ #include "components/policy/core/common/management/management_service.h"
+ #include "components/policy/core/common/policy_namespace.h"
+ #include "components/policy/policy_constants.h"
++#include "components/prefs/pref_service.h"
+ #include "components/services/app_service/public/cpp/app_launch_util.h"
+ #include "components/strings/grit/components_strings.h"
+ #include "content/public/browser/browser_thread.h"
+@@ -315,6 +319,18 @@ void AboutHandler::RegisterMessages() {
+   web_ui()->RegisterMessageCallback(
+       "openHelpPage", base::BindRepeating(&AboutHandler::HandleOpenHelpPage,
+                                           base::Unretained(this)));
++  web_ui()->RegisterMessageCallback(
++      "getPhlinkUpdateStatus",
++      base::BindRepeating(&AboutHandler::HandleGetPhlinkUpdateStatus,
++                          base::Unretained(this)));
++  web_ui()->RegisterMessageCallback(
++      "setPhlinkAutoCheckEnabled",
++      base::BindRepeating(&AboutHandler::HandleSetPhlinkAutoCheckEnabled,
++                          base::Unretained(this)));
++  web_ui()->RegisterMessageCallback(
++      "checkPhlinkUpdatesNow",
++      base::BindRepeating(&AboutHandler::HandleCheckPhlinkUpdatesNow,
++                          base::Unretained(this)));
+ #if BUILDFLAG(IS_CHROMEOS)
+   web_ui()->RegisterMessageCallback(
+       "openDiagnostics",
+@@ -526,6 +542,84 @@ void AboutHandler::HandleOpenHelpPage(const base::ListValue& args) {
+   chrome::ShowHelp(browser, chrome::HelpSource::kWebUI);
+ }
+ 
++void AboutHandler::HandleGetPhlinkUpdateStatus(const base::ListValue& args) {
++  AllowJavascript();
++  CHECK_EQ(1U, args.size());
++  ResolveJavascriptCallback(args[0], GetPhlinkUpdateStatus());
++}
++
++void AboutHandler::HandleSetPhlinkAutoCheckEnabled(
++    const base::ListValue& args) {
++  AllowJavascript();
++  CHECK_EQ(2U, args.size());
++  const std::string& callback_id = args[0].GetString();
++  const bool enabled = args[1].GetBool();
++
++  PrefService* local_state = g_browser_process->local_state();
++  if (local_state) {
++    local_state->SetBoolean(phlink::updater::prefs::kAutoCheckEnabled, enabled);
++    phlink::updater::UpdaterServiceFactory::EnsureFactoryBuilt();
++    if (phlink::updater::UpdaterService* service =
++            phlink::updater::UpdaterServiceFactory::GetForProfile(profile_)) {
++      if (enabled) {
++        service->Start();
++      } else {
++        service->Stop();
++      }
++    }
++  }
++
++  base::DictValue status = GetPhlinkUpdateStatus();
++  ResolveJavascriptCallback(base::Value(callback_id), status.Clone());
++  FireWebUIListener("phlink-update-status-changed", status);
++}
++
++void AboutHandler::HandleCheckPhlinkUpdatesNow(const base::ListValue& args) {
++  DCHECK(args.empty());
++  AllowJavascript();
++  base::DictValue checking = GetPhlinkUpdateStatus();
++  checking.Set("status", "checking");
++  FireWebUIListener("phlink-update-status-changed", checking);
++
++  if (g_browser_process->local_state()) {
++    phlink::updater::UpdaterServiceFactory::EnsureFactoryBuilt();
++    if (phlink::updater::UpdaterService* service =
++            phlink::updater::UpdaterServiceFactory::GetForProfile(profile_)) {
++      service->CheckNow();
++    }
++  }
++
++  FirePhlinkUpdateStatusChanged();
++}
++
++base::DictValue AboutHandler::GetPhlinkUpdateStatus() const {
++  base::DictValue status;
++  PrefService* local_state = g_browser_process->local_state();
++  if (!local_state) {
++    status.Set("status", "unavailable");
++    status.Set("enabled", false);
++    status.Set("canCheck", false);
++    return status;
++  }
++
++  const bool enabled =
++      local_state->GetBoolean(phlink::updater::prefs::kAutoCheckEnabled);
++  const double last_check_time = static_cast<double>(
++      local_state->GetInt64(phlink::updater::prefs::kLastCheckTime));
++  const double next_check_time = static_cast<double>(
++      local_state->GetInt64(phlink::updater::prefs::kNextCheckTime));
++  status.Set("status", enabled ? "updated" : "disabled");
++  status.Set("enabled", enabled);
++  status.Set("canCheck", true);
++  status.Set("lastCheckTime", last_check_time);
++  status.Set("nextCheckTime", next_check_time);
++  return status;
++}
++
++void AboutHandler::FirePhlinkUpdateStatusChanged() {
++  FireWebUIListener("phlink-update-status-changed", GetPhlinkUpdateStatus());
++}
++
+ #if BUILDFLAG(IS_CHROMEOS)
+ void AboutHandler::HandleOpenDiagnostics(const base::ListValue& args) {
+   DCHECK(args.empty());
+diff --git a/chrome/browser/ui/webui/settings/about_handler.h b/chrome/browser/ui/webui/settings/about_handler.h
+index f3bcddd212839..9b661a6ddeacb 100644
+--- a/chrome/browser/ui/webui/settings/about_handler.h
++++ b/chrome/browser/ui/webui/settings/about_handler.h
+@@ -81,6 +81,13 @@ class AboutHandler : public settings::SettingsPageUIHandler,
+   // Opens the help page. |args| must be empty.
+   void HandleOpenHelpPage(const base::ListValue& args);
+ 
++  // phlink updater controls on chrome://settings/help.
++  void HandleGetPhlinkUpdateStatus(const base::ListValue& args);
++  void HandleSetPhlinkAutoCheckEnabled(const base::ListValue& args);
++  void HandleCheckPhlinkUpdatesNow(const base::ListValue& args);
++  base::DictValue GetPhlinkUpdateStatus() const;
++  void FirePhlinkUpdateStatusChanged();
++
+ #if BUILDFLAG(IS_CHROMEOS)
+   // Checks if ReleaseNotes is enabled.
+   void HandleGetEnabledReleaseNotes(const base::ListValue& args);
+diff --git a/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc b/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc
+index 6df10b602e52a..06bf712ce6f35 100644
+--- a/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc
++++ b/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc
+@@ -316,6 +316,7 @@ void AddAboutStrings(content::WebUIDataSource* html_source, Profile* profile) {
+       {"aboutProductTitle", IDS_PRODUCT_NAME},
+       {"aboutLearnMoreUpdatingErrors",
+        IDS_SETTINGS_ABOUT_PAGE_LEARN_MORE_UPDATE_ERRORS},
++      {"phlinkUpdateTitle", IDS_SETTINGS_ABOUT_PROGRAM},
+       {"aboutLearnMoreSystemRequirements",
+        IDS_SETTINGS_ABOUT_PAGE_LEARN_MORE_SYSTEM_REQUIREMENTS},
+ #if BUILDFLAG(IS_MAC)
+@@ -324,6 +325,18 @@ void AddAboutStrings(content::WebUIDataSource* html_source, Profile* profile) {
+   };
+   html_source->AddLocalizedStrings(kLocalizedStrings);
+ 
++  html_source->AddString("phlinkUpdateAutoCheckLabel",
++                         u"Automatically download phlink updates");
++  html_source->AddString("phlinkUpdateCheckNow", u"Check now");
++  html_source->AddString("phlinkUpdateStatusChecking",
++                         u"Checking for updates...");
++  html_source->AddString("phlinkUpdateStatusDisabled",
++                         u"Auto-updates are off.");
++  html_source->AddString("phlinkUpdateStatusUnavailable",
++                         u"Auto-updates are unavailable in this build.");
++  html_source->AddString("phlinkUpdateStatusUpToDate",
++                         u"phlink is up to date.");
++
+   html_source->AddString("managementPage",
+                          GetDeviceManagedUiHelpLabel(profile));
+   html_source->AddString(

@@ -10,9 +10,9 @@
 #     wiped (`shred -u`). Used only for re-signing the root role and
 #     for key-rotation events.
 #
-#   - One online TUF targets keypair (Ed25519). Lives on the release
-#     CI runner; signs targets.json, snapshot.json, and timestamp.json
-#     on each release.
+#   - Three online TUF keypairs (Ed25519). The targets, snapshot, and
+#     timestamp keys live on the release CI runner and sign their own
+#     TUF roles on each release.
 #
 #   - One gpg keypair for Linux package signing (deb/rpm/AppImage).
 #
@@ -25,8 +25,12 @@
 #   <output-dir>/root.json           (TUF root metadata, unsigned)
 #   <output-dir>/targets.key
 #   <output-dir>/targets.pub
+#   <output-dir>/snapshot.key
+#   <output-dir>/snapshot.pub
+#   <output-dir>/timestamp.key
+#   <output-dir>/timestamp.pub
 #   <output-dir>/release.gpg         (ASCII-armored public)
-#   <output-dir>/release.gpg.secret  (ASCII-armored secret -> air-gap!)
+#   <output-dir>/release.gpg.secret  (ASCII-armored secret -> CI secret)
 
 set -euo pipefail
 
@@ -60,6 +64,12 @@ generate_ed25519 root
 
 echo "Generating TUF targets key..."
 generate_ed25519 targets
+
+echo "Generating TUF snapshot key..."
+generate_ed25519 snapshot
+
+echo "Generating TUF timestamp key..."
+generate_ed25519 timestamp
 
 echo "Generating gpg release key..."
 GNUPGHOME="$(mktemp -d -t phlink-gpg.XXXXXX)"
@@ -95,8 +105,12 @@ Generated:
   ${OUT}/root.pub            -> bake into chrome/browser/phlink/updater/keys/dev_root.json
   ${OUT}/targets.key         -> upload to CI secret store (GitHub Actions secret).
   ${OUT}/targets.pub
+  ${OUT}/snapshot.key        -> upload to CI secret store (GitHub Actions secret).
+  ${OUT}/snapshot.pub
+  ${OUT}/timestamp.key       -> upload to CI secret store (GitHub Actions secret).
+  ${OUT}/timestamp.pub
   ${OUT}/release.gpg         -> bundle into linux installers as /usr/share/phlink/release.gpg
-  ${OUT}/release.gpg.secret  -> AIR-GAP THIS.
+  ${OUT}/release.gpg.secret  -> upload to CI secret store (GitHub Actions secret).
 
 Next steps: see docs/dev/release-keys.md.
 EOF

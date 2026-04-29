@@ -18,7 +18,30 @@ Third-party actions are pinned by full-length commit SHA. The job has `permissio
 
 - **No Chromium fetch or build.** That requires ~100 GB of disk and many hours of compute per OS — not feasible on GitHub-hosted runners and prohibitively expensive on hosted services.
 - **No browser smoke tests.** Same reason.
-- **No release builds, signing, or installer generation.** Deferred to Phase 10.
+- **No Chromium release builds.** Release packaging consumes prebuilt Chromium
+	outputs from a separate, self-hosted or local build run.
+
+## Release packaging workflows (Phase 10)
+
+Phase 10 adds two manual release workflows:
+
+| Workflow | Trigger | Purpose |
+|---|---|---|
+| [`.github/workflows/package-installers.yml`](../../.github/workflows/package-installers.yml) | `workflow_dispatch` | Downloads prebuilt `out/Default` artifacts from a Chromium build run and runs the platform installer scripts. |
+| [`.github/workflows/release-sign.yml`](../../.github/workflows/release-sign.yml) | `workflow_dispatch` | Produces TUF `targets.json` plus Linux detached signatures from packaged installer artifacts. |
+
+These jobs intentionally do not fetch Chromium or run `autoninja` on
+GitHub-hosted runners. That keeps the release path compatible with the repo's
+current CI budget while still giving signing and packaging a reproducible entry
+point.
+
+`release-sign.yml` is gated by the `release-signing` GitHub environment and
+expects these environment secrets:
+
+- `PHLINK_TARGETS_KEY` — Ed25519 TUF targets private key.
+- `PHLINK_SNAPSHOT_KEY` — Ed25519 TUF snapshot private key.
+- `PHLINK_TIMESTAMP_KEY` — Ed25519 TUF timestamp private key.
+- `PHLINK_GPG_SECRET` — ASCII-armored gpg release signing secret key.
 
 ## Soon
 

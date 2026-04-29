@@ -6,7 +6,7 @@
   Builds a phlink MSI installer from an already-built phlink.exe tree.
 
 .DESCRIPTION
-  Wraps the WiX toolset (v3.x) to produce phlink-<version>-win-x64.msi.
+  Wraps the WiX toolset (v3.x) to produce dist/phlink-<version>-win-x64.msi.
   Requires `candle.exe` and `light.exe` on PATH.
 
   This script does NOT sign the MSI. Authenticode signing is a CI step
@@ -35,6 +35,8 @@ if (-not (Get-Command candle.exe -ErrorAction SilentlyContinue)) {
 
 $workDir = New-Item -ItemType Directory -Path "$env:TEMP/phlink-msi-$([guid]::NewGuid())"
 try {
+  $distDir = Join-Path (Get-Location) "dist"
+  New-Item -ItemType Directory -Force -Path $distDir | Out-Null
   $wxs = @"
 <?xml version='1.0' encoding='UTF-8'?>
 <Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
@@ -71,7 +73,7 @@ try {
   try {
     & candle.exe phlink.wxs
     if ($LASTEXITCODE -ne 0) { throw "candle failed" }
-    $msiOut = Join-Path $OutDir "phlink-$Version-win-x64.msi"
+    $msiOut = Join-Path $distDir "phlink-$Version-win-x64.msi"
     & light.exe -ext WixUIExtension -out $msiOut phlink.wixobj
     if ($LASTEXITCODE -ne 0) { throw "light failed" }
     Write-Host "wrote $msiOut"

@@ -1,0 +1,135 @@
+name: package-installers
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version, for example 0.1.0
+        required: true
+      chromium_run_id:
+        description: Workflow run ID containing prebuilt out/Default artifacts
+        required: true
+      mac_artifact:
+        description: macOS out/Default artifact name
+        required: false
+        default: phlink-mac-out
+      linux_artifact:
+        description: Linux out/Default artifact name
+        required: false
+        default: phlink-linux-out
+      windows_artifact:
+        description: Windows out/Default artifact name
+        required: false
+        default: phlink-windows-out
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: package-installers-${{ github.ref }}-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  macos:
+    name: package macOS dmg
+    if: inputs.mac_artifact != ''
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+
+      - name: Download macOS build output
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.chromium_run_id }}
+          ARTIFACT: ${{ inputs.mac_artifact }}
+        run: gh run download "$RUN_ID" --name "$ARTIFACT" --dir "$RUNNER_TEMP/out"
+
+      - name: Build dmg
+        env:
+          VERSION: ${{ inputs.version }}
+        run: installers/mac/build-dmg.sh "$RUNNER_TEMP/out" "$VERSION"
+
+      - name: Upload dmg
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: phlink-${{ inputs.version }}-mac-installer
+          path: dist/*.dmg
+          if-no-files-found: error
+
+  linux:
+    name: package Linux artifacts
+    if: inputs.linux_artifact != ''
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+
+      - name: Download Linux build output
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.chromium_run_id }}
+          ARTIFACT: ${{ inputs.linux_artifact }}
+        run: gh run download "$RUN_ID" --name "$ARTIFACT" --dir "$RUNNER_TEMP/out"
+
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ruby ruby-dev rpm squashfs-tools
+          sudo gem install --no-document fpm
+          curl -fsSL -o "$RUNNER_TEMP/appimagetool" \
+            https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x "$RUNNER_TEMP/appimagetool"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+
+      - name: Build Linux installers
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: '1'
+          VERSION: ${{ inputs.version }}
+        run: |
+          installers/linux/build-appimage.sh "$RUNNER_TEMP/out" "$VERSION"
+          installers/linux/build-packages.sh "$RUNNER_TEMP/out" "$VERSION"
+
+      - name: Upload Linux installers
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: phlink-${{ inputs.version }}-linux-installers
+          path: |
+            dist/*.AppImage
+            dist/*.deb
+            dist/*.rpm
+          if-no-files-found: error
+
+  windows:
+    name: package Windows msi
+    if: inputs.windows_artifact != ''
+    runs-on: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+
+      - name: Download Windows build output
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.chromium_run_id }}
+          ARTIFACT: ${{ inputs.windows_artifact }}
+        run: gh run download "$env:RUN_ID" --name "$env:ARTIFACT" --dir "$env:RUNNER_TEMP\out"
+
+      - name: Install WiX
+        shell: pwsh
+        run: choco install wixtoolset --version=3.14.1 -y
+
+      - name: Build MSI
+        shell: pwsh
+        env:
+          VERSION: ${{ inputs.version }}
+        run: installers/windows/build-msi.ps1 -OutDir "$env:RUNNER_TEMP\out" -Version "$env:VERSION"
+
+      - name: Upload MSI
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: phlink-${{ inputs.version }}-windows-installer
+          path: dist/*.msi
+          if-no-files-found: error

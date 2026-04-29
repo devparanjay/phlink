@@ -27,7 +27,13 @@ installers/linux/build-appimage.sh /path/to/chromium-src/src/out/Default 0.1.0
 # or, on Windows:
 pwsh installers/windows/build-msi.ps1 -OutDir C:\src\chromium-src\src\out\Default -Version 0.1.0
 
-# 4. Sign (CI only; see release-keys.md).
+# 4. Upload/sign through the manual release workflows.
+gh workflow run package-installers.yml \
+  -f version=0.1.0 \
+  -f chromium_run_id=<run-id-with-out-default-artifacts>
+gh workflow run release-sign.yml \
+  -f version=0.1.0 \
+  -f package_run_id=<package-installers-run-id>
 ```
 
 ## Artifacts

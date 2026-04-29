@@ -9,8 +9,8 @@
 #   installers/linux/build-packages.sh <out-dir> <version>
 #
 # Output:
-#   <out-dir>/phlink_<version>_amd64.deb
-#   <out-dir>/phlink-<version>-1.x86_64.rpm
+#   dist/phlink_<version>_amd64.deb
+#   dist/phlink-<version>-1.x86_64.rpm
 
 set -euo pipefail
 
@@ -29,6 +29,7 @@ fi
 
 STAGE="$(mktemp -d -t phlink-pkg.XXXXXX)"
 trap 'rm -rf "${STAGE}"' EXIT
+mkdir -p dist
 
 mkdir -p "${STAGE}/usr/bin" "${STAGE}/usr/share/applications" \
          "${STAGE}/usr/share/icons/hicolor/256x256/apps" \
@@ -67,7 +68,7 @@ COMMON_ARGS=(
   -s dir
 )
 
-fpm "${COMMON_ARGS[@]}" -t deb -p "${OUT_DIR}/phlink_${VERSION}_amd64.deb" .
-fpm "${COMMON_ARGS[@]}" -t rpm -p "${OUT_DIR}/phlink-${VERSION}-1.x86_64.rpm" .
+fpm "${COMMON_ARGS[@]}" -t deb -p "dist/phlink_${VERSION}_amd64.deb" .
+fpm "${COMMON_ARGS[@]}" -t rpm -p "dist/phlink-${VERSION}-1.x86_64.rpm" .
 
-echo "wrote .deb and .rpm to ${OUT_DIR}"
+echo "wrote .deb and .rpm to dist/"
