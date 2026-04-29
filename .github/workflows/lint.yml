@@ -63,6 +63,9 @@ jobs:
       - name: license-audit (third-party license-compatibility check)
         run: python scripts/license-audit.py
 
+      - name: phlink WCAG-AA contrast audit (Phase 8 D-07)
+        run: python scripts/contrast-audit.py --self-test
+
   lint-macos:
     name: lint (macos-14)
     runs-on: macos-14

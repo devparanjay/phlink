@@ -1,0 +1,236 @@
+From 03544e0b8db814b01030d8f3fa473531fe6fb0a3 Mon Sep 17 00:00:00 2001
+From: phlink <phlink@local>
+Date: Wed, 29 Apr 2026 19:11:39 +0530
+Subject: [PATCH] phlink: phase 08-05 WCAG-AA contrast gate (gtest + pair
+ tables, D-07)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Patch slot 0114. Lands the chromium-side half of D-07's two-layer contrast
+gate: contrast pair tables in phlink_palette.{h,cc} and a gtest
+(phlink_color_contrast_unittests.cc) that walks each pair for both
+ColorMode::kLight and ColorMode::kDark and asserts the WCAG 2.2 ratio via
+color_utils::GetContrastRatio.
+
+NormalText table (≥4.5:1) covers the 7 default-theme pairs verified in
+.planning/sketches/phase-08/stitch-output.md §2.3 — Text/Canvas, Text/Surface,
+Text/Card, Text/SurfaceAlt, TextMuted/Canvas, TextMuted/Surface, OnAccent/Accent
+(the latter pinning the never-white invariant for both modes).
+
+NonText table is intentionally size 0: stitch-output.md §2.3 does not gate
+hairlines (they are decorative dividers, outside WCAG SC 1.4.11 scope), and
+the (Accent, Canvas) Light pair is already mitigated by 2px stroke + check
+icon (semantic redundancy). The structural slot is preserved so future
+non-text UI affordances can be gated without a new gtest file.
+
+Tests pass: 4 new + 11 prior PhlinkColor* = 15/15 SUCCESS.
+
+Refs: APPR-05, D-07, D-12.
+---
+ .../color/phlink_color_contrast_unittests.cc  | 96 +++++++++++++++++++
+ chrome/browser/ui/color/phlink_palette.cc     | 27 +++++-
+ chrome/browser/ui/color/phlink_palette.h      | 25 ++++-
+ chrome/test/BUILD.gn                          |  1 +
+ 4 files changed, 141 insertions(+), 8 deletions(-)
+ create mode 100644 chrome/browser/ui/color/phlink_color_contrast_unittests.cc
+
+diff --git a/chrome/browser/ui/color/phlink_color_contrast_unittests.cc b/chrome/browser/ui/color/phlink_color_contrast_unittests.cc
+new file mode 100644
+index 0000000000000..a27f9c6a209e7
+--- /dev/null
++++ b/chrome/browser/ui/color/phlink_color_contrast_unittests.cc
+@@ -0,0 +1,96 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// Phase 08-05 (D-07, D-12): WCAG-AA contrast gate. Walks the pair tables
++// declared in phlink_palette.{h,cc} for both Light and Dark ColorMode and
++// asserts each pair meets its WCAG 2.2 threshold (4.5:1 normal text,
++// 3.0:1 non-text UI). Mirrored by scripts/contrast-audit.py at lint time.
++
++#include <utility>
++
++#include "chrome/browser/ui/color/chrome_color_id.h"
++#include "chrome/browser/ui/color/phlink_color_mixer.h"
++#include "chrome/browser/ui/color/phlink_palette.h"
++#include "testing/gtest/include/gtest/gtest.h"
++#include "third_party/skia/include/core/SkColor.h"
++#include "ui/color/color_provider.h"
++#include "ui/color/color_provider_key.h"
++#include "ui/gfx/color_utils.h"
++
++namespace {
++
++constexpr double kWcagAaNormalText = 4.5;
++constexpr double kWcagAaNonText = 3.0;
++
++const char* PhlinkColorIdName(ui::ColorId id) {
++  switch (id) {
++    case kColorPhlinkCanvas: return "kColorPhlinkCanvas";
++    case kColorPhlinkSurface: return "kColorPhlinkSurface";
++    case kColorPhlinkSurfaceAlt: return "kColorPhlinkSurfaceAlt";
++    case kColorPhlinkCard: return "kColorPhlinkCard";
++    case kColorPhlinkText: return "kColorPhlinkText";
++    case kColorPhlinkTextMuted: return "kColorPhlinkTextMuted";
++    case kColorPhlinkHairline: return "kColorPhlinkHairline";
++    case kColorPhlinkAccent: return "kColorPhlinkAccent";
++    case kColorPhlinkOnAccent: return "kColorPhlinkOnAccent";
++    case kColorPhlinkDanger: return "kColorPhlinkDanger";
++    case kColorPhlinkSuccess: return "kColorPhlinkSuccess";
++    default: return "<unknown>";
++  }
++}
++
++template <size_t N>
++void ExpectPairs(
++    const ui::ColorProvider& provider,
++    const std::array<std::pair<ui::ColorId, ui::ColorId>, N>& pairs,
++    double threshold,
++    const char* mode_name) {
++  for (const auto& pair : pairs) {
++    const SkColor fg = provider.GetColor(pair.first);
++    const SkColor bg = provider.GetColor(pair.second);
++    const double ratio = color_utils::GetContrastRatio(fg, bg);
++    EXPECT_GE(ratio, threshold)
++        << "WCAG-AA contrast regression: ("
++        << PhlinkColorIdName(pair.first) << " #" << std::hex
++        << (fg & 0x00FFFFFF) << ", "
++        << PhlinkColorIdName(pair.second) << " #" << std::hex
++        << (bg & 0x00FFFFFF) << ") in " << mode_name
++        << " — got " << ratio << ", required " << threshold;
++  }
++}
++
++template <size_t N>
++void RunPairs(ui::ColorProviderKey::ColorMode mode,
++              const std::array<std::pair<ui::ColorId, ui::ColorId>, N>& pairs,
++              double threshold,
++              const char* mode_name) {
++  ui::ColorProvider provider;
++  ui::ColorProviderKey key;
++  key.color_mode = mode;
++  AddPhlinkColorMixer(&provider, key);
++  provider.GenerateColorMapForTesting();
++  ExpectPairs(provider, pairs, threshold, mode_name);
++}
++
++TEST(PhlinkContrastTest, NormalTextPairs_Light) {
++  RunPairs(ui::ColorProviderKey::ColorMode::kLight,
++           phlink::kPhlinkContrastNormalText, kWcagAaNormalText, "Light");
++}
++
++TEST(PhlinkContrastTest, NormalTextPairs_Dark) {
++  RunPairs(ui::ColorProviderKey::ColorMode::kDark,
++           phlink::kPhlinkContrastNormalText, kWcagAaNormalText, "Dark");
++}
++
++TEST(PhlinkContrastTest, NonTextPairs_Light) {
++  RunPairs(ui::ColorProviderKey::ColorMode::kLight,
++           phlink::kPhlinkContrastNonText, kWcagAaNonText, "Light");
++}
++
++TEST(PhlinkContrastTest, NonTextPairs_Dark) {
++  RunPairs(ui::ColorProviderKey::ColorMode::kDark,
++           phlink::kPhlinkContrastNonText, kWcagAaNonText, "Dark");
++}
++
++}  // namespace
+diff --git a/chrome/browser/ui/color/phlink_palette.cc b/chrome/browser/ui/color/phlink_palette.cc
+index 7cf7a9d128546..5d6ec68decaa9 100644
+--- a/chrome/browser/ui/color/phlink_palette.cc
++++ b/chrome/browser/ui/color/phlink_palette.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "chrome/browser/ui/color/phlink_palette.h"
+ 
++#include "chrome/browser/ui/color/chrome_color_id.h"
++
+ namespace phlink {
+ 
+ // Locked by Phase 8 D-08; source: .planning/sketches/phase-08/stitch-output.md §2.1.
+@@ -39,10 +41,27 @@ const SkColor kPhlinkDark[kPhlinkPaletteSize] = {
+     SkColorSetRGB(0x6F, 0xE3, 0x8A),  // [10] kSuccess     — #6FE38A
+ };
+ 
+-// Filled by patch 0114 (D-07 WCAG-AA gate).
+-const std::array<std::pair<ui::ColorId, ui::ColorId>, 0>
+-    kPhlinkContrastNormalText = {};
+-const std::array<std::pair<ui::ColorId, ui::ColorId>, 0>
++// WCAG-AA contrast pair tables (D-07). Source: stitch-output.md §2.3.
++// Pairs are (foreground, background). The (kColorPhlinkAccent, kColorPhlinkCanvas)
++// Light pair is INTENTIONALLY excluded — its 1.5:1 ratio is mitigated by a 2px
++// stroke + check icon per WCAG SC 1.4.11 (semantic redundancy). All pairs in
++// these tables MUST pass for both Light and Dark modes; regression triggers
++// the phlink_color_contrast_unittests gate (chromium-side) and the
++// scripts/contrast-audit.py mirror (phlink-side CI).
++const std::array<std::pair<ui::ColorId, ui::ColorId>,
++                 kPhlinkContrastNormalTextSize>
++    kPhlinkContrastNormalText = {{
++        {kColorPhlinkText, kColorPhlinkCanvas},
++        {kColorPhlinkText, kColorPhlinkSurface},
++        {kColorPhlinkText, kColorPhlinkCard},
++        {kColorPhlinkText, kColorPhlinkSurfaceAlt},
++        {kColorPhlinkTextMuted, kColorPhlinkCanvas},
++        {kColorPhlinkTextMuted, kColorPhlinkSurface},
++        {kColorPhlinkOnAccent, kColorPhlinkAccent},
++    }};
++
++const std::array<std::pair<ui::ColorId, ui::ColorId>,
++                 kPhlinkContrastNonTextSize>
+     kPhlinkContrastNonText = {};
+ 
+ }  // namespace phlink
+diff --git a/chrome/browser/ui/color/phlink_palette.h b/chrome/browser/ui/color/phlink_palette.h
+index 4c9331c3b60f1..85a42037c1347 100644
+--- a/chrome/browser/ui/color/phlink_palette.h
++++ b/chrome/browser/ui/color/phlink_palette.h
+@@ -38,11 +38,28 @@ enum PhlinkToken : size_t {
+ extern const SkColor kPhlinkLight[kPhlinkPaletteSize];
+ extern const SkColor kPhlinkDark[kPhlinkPaletteSize];
+ 
+-// WCAG-AA contrast pair tables (D-07). Sizes are zero in patch 0110; patch
+-// 0114 wires the gtest gate using these arrays.
+-extern const std::array<std::pair<ui::ColorId, ui::ColorId>, 0>
++// WCAG-AA contrast pair tables (D-07). See:
++//   .planning/phases/08-appearance-subsystem/08-CONTEXT.md D-07
++//   .planning/sketches/phase-08/stitch-output.md §2.3
++// The (kColorPhlinkAccent, kColorPhlinkCanvas) Light pair is INTENTIONALLY
++// excluded — its 1.5:1 ratio is mitigated by a 2px stroke + check icon per
++// WCAG SC 1.4.11 (semantic redundancy). Hairline pairs are also excluded:
++// hairlines are purely decorative dividers (no semantic state, no
++// interaction affordance) and fall outside WCAG SC 1.4.11 per its scope
++// note ("pure decoration" exclusion). The recessive ~1.2:1 hairline-to-
++// surface ratio is design-locked by D-08 / stitch-output.md §2.3 (which
++// does not gate hairlines). All pairs in the NormalText table MUST pass
++// 4.5:1; pairs are stored as (foreground, background); pairs in the
++// NonText table MUST pass 3.0:1. phlink_color_contrast_unittests.cc walks
++// both for ColorMode::kLight and ColorMode::kDark.
++inline constexpr size_t kPhlinkContrastNormalTextSize = 7;
++inline constexpr size_t kPhlinkContrastNonTextSize = 0;
++
++extern const std::array<std::pair<ui::ColorId, ui::ColorId>,
++                        kPhlinkContrastNormalTextSize>
+     kPhlinkContrastNormalText;
+-extern const std::array<std::pair<ui::ColorId, ui::ColorId>, 0>
++extern const std::array<std::pair<ui::ColorId, ui::ColorId>,
++                        kPhlinkContrastNonTextSize>
+     kPhlinkContrastNonText;
+ 
+ }  // namespace phlink
+diff --git a/chrome/test/BUILD.gn b/chrome/test/BUILD.gn
+index 4556b0e64e477..89a754ee28b85 100644
+--- a/chrome/test/BUILD.gn
++++ b/chrome/test/BUILD.gn
+@@ -8347,6 +8347,7 @@ test("unit_tests") {
+       "../browser/ui/color/chrome_color_provider_utils_unittest.cc",
+       "../browser/ui/color/material_new_tab_page_color_mixer_unittest.cc",
+       "../browser/ui/color/new_tab_page_color_mixer_unittest.cc",
++      "../browser/ui/color/phlink_color_contrast_unittests.cc",
+       "../browser/ui/color/phlink_color_mixer_unittests.cc",
+       "../browser/ui/incognito_allowed_url_unittest.cc",
+       "../browser/ui/intent_picker_tab_helper_unittest.cc",
+-- 
+2.50.1 (Apple Git-155)
+
