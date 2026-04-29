@@ -1,0 +1,962 @@
+From a321bbf01f6f26b1d46965b2037abcd024bfff57 Mon Sep 17 00:00:00 2001
+From: phlink <dev@phlink.local>
+Date: Thu, 30 Apr 2026 00:17:14 +0530
+Subject: [PATCH] phlink: phase 10.02c MetadataFetcher (TUF metadata over
+ SimpleURLLoader)
+
+Adds phlink::updater::MetadataFetcher: a per-check object that fetches
+TUF metadata files (timestamp.json, snapshot.json, targets.json) over
+network::SimpleURLLoader and feeds each body into TufClient::Ingest*.
+Failures (network or schema) are surfaced as TufError via the result
+callback.
+
+Also extracts the metadata fixture builders from metadata_client_unittest
+into a shared metadata_test_helpers source set so the new fetcher tests
+can reuse them. Switches the phlink_updater_unittests test runner from
+//base/test:run_all_unittests to //mojo/core/test:run_all_unittests so
+that SimpleURLLoader's Mojo plumbing is available to the fetcher tests.
+
+Tests (14/14 pass):
+  - 3 new MetadataFetcherTest cases (happy path, network error,
+    malformed JSON on timestamp).
+  - All existing UpdaterService, UpdateCheckScheduler, and TufClient
+    tests still pass.
+
+Refs phlink phase 10-02c.
+---
+ chrome/browser/phlink/updater/BUILD.gn        |  48 ++++-
+ .../updater/metadata_client_unittest.cc       | 182 ++----------------
+ .../phlink/updater/metadata_fetcher.cc        | 158 +++++++++++++++
+ .../browser/phlink/updater/metadata_fetcher.h |  72 +++++++
+ .../updater/metadata_fetcher_unittest.cc      | 134 +++++++++++++
+ .../phlink/updater/metadata_test_helpers.cc   | 178 +++++++++++++++++
+ .../phlink/updater/metadata_test_helpers.h    |  61 ++++++
+ 7 files changed, 661 insertions(+), 172 deletions(-)
+ create mode 100644 chrome/browser/phlink/updater/metadata_fetcher.cc
+ create mode 100644 chrome/browser/phlink/updater/metadata_fetcher.h
+ create mode 100644 chrome/browser/phlink/updater/metadata_fetcher_unittest.cc
+ create mode 100644 chrome/browser/phlink/updater/metadata_test_helpers.cc
+ create mode 100644 chrome/browser/phlink/updater/metadata_test_helpers.h
+
+diff --git a/chrome/browser/phlink/updater/BUILD.gn b/chrome/browser/phlink/updater/BUILD.gn
+index a1741a93a8bf0..a9551e1566685 100644
+--- a/chrome/browser/phlink/updater/BUILD.gn
++++ b/chrome/browser/phlink/updater/BUILD.gn
+@@ -62,6 +62,44 @@ source_set("service") {
+   ]
+ }
+ 
++# MetadataFetcher: drives a TUF metadata fetch sequence
++# (timestamp -> snapshot -> targets) over network::SimpleURLLoader,
++# feeding each blob into a caller-owned TufClient. Used as the
++# CheckCallback for UpdaterService in production. Plan 10-02d will
++# add the payload (.zip) download alongside this.
++source_set("fetcher") {
++  sources = [
++    "metadata_fetcher.cc",
++    "metadata_fetcher.h",
++  ]
++  deps = [
++    ":metadata",
++    "//base",
++    "//net/traffic_annotation",
++    "//services/network/public/cpp",
++    "//services/network/public/mojom",
++    "//url",
++  ]
++}
++
++# Shared metadata-builder helpers used by metadata_client_unittest
++# and metadata_fetcher_unittest. Builds Ed25519-signed root /
++# timestamp / snapshot / targets envelopes inline so tests don't
++# need on-disk fixtures.
++source_set("test_helpers") {
++  testonly = true
++  sources = [
++    "metadata_test_helpers.cc",
++    "metadata_test_helpers.h",
++  ]
++  deps = [
++    ":canonical_json",
++    "//base",
++    "//crypto",
++    "//third_party/boringssl",
++  ]
++}
++
+ # Dev-only trust root. `phlink_updater_dev_root` (in phlink_updater.gni)
+ # selects this. Production builds will replace it with `prod_root.json` in
+ # Phase 10 plan 10-08.
+@@ -76,27 +114,35 @@ source_set("unit_tests") {
+   testonly = true
+   sources = [
+     "metadata_client_unittest.cc",
++    "metadata_fetcher_unittest.cc",
+     "update_check_scheduler_unittest.cc",
+     "updater_service_unittest.cc",
+   ]
+   deps = [
+     ":canonical_json",
++    ":fetcher",
+     ":metadata",
+     ":scheduler",
+     ":service",
++    ":test_helpers",
+     "//base",
+     "//base/test:test_support",
+     "//components/prefs",
+     "//components/prefs:test_support",
+     "//crypto",
++    "//net",
++    "//services/network:test_support",
++    "//services/network/public/cpp",
++    "//services/network/public/mojom",
+     "//testing/gtest",
+     "//third_party/boringssl",
++    "//url",
+   ]
+ }
+ 
+ test("phlink_updater_unittests") {
+   deps = [
+     ":unit_tests",
+-    "//base/test:run_all_unittests",
++    "//mojo/core/test:run_all_unittests",
+   ]
+ }
+diff --git a/chrome/browser/phlink/updater/metadata_client_unittest.cc b/chrome/browser/phlink/updater/metadata_client_unittest.cc
+index 7f31ad77abcdb..903c0bb2af472 100644
+--- a/chrome/browser/phlink/updater/metadata_client_unittest.cc
++++ b/chrome/browser/phlink/updater/metadata_client_unittest.cc
+@@ -4,184 +4,24 @@
+ 
+ #include "chrome/browser/phlink/updater/metadata_client.h"
+ 
+-#include <array>
+-#include <cstdint>
+ #include <string>
+-#include <vector>
+ 
+-#include "base/strings/string_number_conversions.h"
+-#include "base/strings/string_util.h"
+-#include "base/values.h"
+-#include "chrome/browser/phlink/updater/canonical_json.h"
+-#include "crypto/keypair.h"
+-#include "crypto/sign.h"
++#include "base/check.h"
++#include "base/time/time.h"
++#include "chrome/browser/phlink/updater/metadata_test_helpers.h"
+ #include "testing/gtest/include/gtest/gtest.h"
+-#include "third_party/boringssl/src/include/openssl/sha.h"
+ 
+ namespace phlink::updater {
+ namespace {
+ 
+-std::string ToHex(base::span<const uint8_t> bytes) {
+-  return base::ToLowerASCII(base::HexEncode(bytes));
+-}
+-
+-// A single Ed25519 keypair plus its TUF-style key_id.
+-struct TestKey {
+-  crypto::keypair::PrivateKey private_key;
+-  std::array<uint8_t, 32> public_bytes;
+-  std::string keyid;
+-};
+-
+-TestKey MakeTestKey() {
+-  crypto::keypair::PrivateKey priv = crypto::keypair::PrivateKey::GenerateEd25519();
+-  std::array<uint8_t, 32> pub = priv.ToEd25519PublicKey();
+-
+-  // Compute keyid = sha256(canonical_json({keytype, keyval{public}, scheme})).
+-  base::DictValue keyval;
+-  keyval.Set("public", ToHex(pub));
+-  base::DictValue key_dict;
+-  key_dict.Set("keytype", "ed25519");
+-  key_dict.Set("keyval", std::move(keyval));
+-  key_dict.Set("scheme", "ed25519");
+-  base::Value v(std::move(key_dict));
+-  std::string canonical = *EncodeCanonicalJson(v);
+-
+-  std::array<uint8_t, 32> hash{};
+-  ::SHA256(reinterpret_cast<const uint8_t*>(canonical.data()),
+-           canonical.size(), hash.data());
+-
+-  return TestKey{std::move(priv), pub, ToHex(hash)};
+-}
+-
+-// Wraps `signed_value` in a `{ signed, signatures }` envelope, signing it
+-// with each of `signers`.
+-std::string Envelope(const base::DictValue& signed_value,
+-                     const std::vector<const TestKey*>& signers) {
+-  base::Value v(signed_value.Clone());
+-  std::string canonical = *EncodeCanonicalJson(v);
+-  base::span<const uint8_t> message =
+-      base::as_byte_span(canonical);
+-
+-  base::ListValue sigs;
+-  for (const TestKey* k : signers) {
+-    std::vector<uint8_t> sig =
+-        crypto::sign::Sign(crypto::sign::ED25519, k->private_key, message);
+-    base::DictValue s;
+-    s.Set("keyid", k->keyid);
+-    s.Set("sig", ToHex(sig));
+-    sigs.Append(std::move(s));
+-  }
+-
+-  base::DictValue outer;
+-  outer.Set("signed", signed_value.Clone());
+-  outer.Set("signatures", std::move(sigs));
+-  // Serialize the outer envelope however; production parses with
+-  // base::JSONReader so any valid JSON shape works (signatures are checked
+-  // against the canonical-JSON of `signed`, not the on-disk envelope).
+-  return *EncodeCanonicalJson(base::Value(std::move(outer)));
+-}
+-
+-base::DictValue BuildRootSigned(const TestKey& root_key,
+-                                  const std::string& expires) {
+-  base::DictValue keyval;
+-  keyval.Set("public", ToHex(root_key.public_bytes));
+-  base::DictValue key;
+-  key.Set("keytype", "ed25519");
+-  key.Set("keyval", std::move(keyval));
+-  key.Set("scheme", "ed25519");
+-  base::DictValue keys;
+-  keys.Set(root_key.keyid, std::move(key));
+-
+-  auto make_role = [&]() {
+-    base::ListValue ids;
+-    ids.Append(root_key.keyid);
+-    base::DictValue r;
+-    r.Set("keyids", std::move(ids));
+-    r.Set("threshold", 1);
+-    return r;
+-  };
+-  base::DictValue roles;
+-  roles.Set("root", make_role());
+-  roles.Set("targets", make_role());
+-  roles.Set("snapshot", make_role());
+-  roles.Set("timestamp", make_role());
+-
+-  base::DictValue signed_dict;
+-  signed_dict.Set("_type", "root");
+-  signed_dict.Set("spec_version", "1.0.32");
+-  signed_dict.Set("version", 1);
+-  signed_dict.Set("expires", expires);
+-  signed_dict.Set("consistent_snapshot", false);
+-  signed_dict.Set("keys", std::move(keys));
+-  signed_dict.Set("roles", std::move(roles));
+-  return signed_dict;
+-}
+-
+-base::DictValue BuildTimestampSigned(int version,
+-                                       const std::string& expires,
+-                                       int snapshot_version,
+-                                       const std::string& snapshot_bytes) {
+-  std::array<uint8_t, 32> sha{};
+-  ::SHA256(reinterpret_cast<const uint8_t*>(snapshot_bytes.data()),
+-           snapshot_bytes.size(), sha.data());
+-  base::DictValue hashes;
+-  hashes.Set("sha256", ToHex(sha));
+-  base::DictValue snap_meta;
+-  snap_meta.Set("version", snapshot_version);
+-  snap_meta.Set("length", static_cast<int>(snapshot_bytes.size()));
+-  snap_meta.Set("hashes", std::move(hashes));
+-  base::DictValue meta;
+-  meta.Set("snapshot.json", std::move(snap_meta));
+-  base::DictValue s;
+-  s.Set("_type", "timestamp");
+-  s.Set("spec_version", "1.0.32");
+-  s.Set("version", version);
+-  s.Set("expires", expires);
+-  s.Set("meta", std::move(meta));
+-  return s;
+-}
+-
+-base::DictValue BuildSnapshotSigned(int version,
+-                                      const std::string& expires,
+-                                      int targets_version) {
+-  base::DictValue tgt_meta;
+-  tgt_meta.Set("version", targets_version);
+-  base::DictValue meta;
+-  meta.Set("targets.json", std::move(tgt_meta));
+-  base::DictValue s;
+-  s.Set("_type", "snapshot");
+-  s.Set("spec_version", "1.0.32");
+-  s.Set("version", version);
+-  s.Set("expires", expires);
+-  s.Set("meta", std::move(meta));
+-  return s;
+-}
+-
+-base::DictValue BuildTargetsSigned(int version,
+-                                     const std::string& expires) {
+-  std::array<uint8_t, 32> fake_sha{};
+-  for (size_t i = 0; i < fake_sha.size(); ++i) {
+-    fake_sha[i] = static_cast<uint8_t>(i);
+-  }
+-  base::DictValue hashes;
+-  hashes.Set("sha256", ToHex(fake_sha));
+-  base::DictValue tgt;
+-  tgt.Set("length", 1024);
+-  tgt.Set("hashes", std::move(hashes));
+-  base::DictValue targets;
+-  targets.Set("phlink-1.0.0-mac-arm64.zip", std::move(tgt));
+-  base::DictValue s;
+-  s.Set("_type", "targets");
+-  s.Set("spec_version", "1.0.32");
+-  s.Set("version", version);
+-  s.Set("expires", expires);
+-  s.Set("targets", std::move(targets));
+-  return s;
+-}
+-
+-base::span<const uint8_t> Bytes(const std::string& s) {
+-  return base::as_byte_span(s);
+-}
++using test_helpers::BuildRootSigned;
++using test_helpers::BuildSnapshotSigned;
++using test_helpers::BuildTargetsSigned;
++using test_helpers::BuildTimestampSigned;
++using test_helpers::Bytes;
++using test_helpers::Envelope;
++using test_helpers::MakeTestKey;
++using test_helpers::TestKey;
+ 
+ base::Time SomeNow() {
+   base::Time t;
+diff --git a/chrome/browser/phlink/updater/metadata_fetcher.cc b/chrome/browser/phlink/updater/metadata_fetcher.cc
+new file mode 100644
+index 0000000000000..24f07f3ee641b
+--- /dev/null
++++ b/chrome/browser/phlink/updater/metadata_fetcher.cc
+@@ -0,0 +1,158 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/phlink/updater/metadata_fetcher.h"
++
++#include <utility>
++
++#include "base/check.h"
++#include "base/containers/span.h"
++#include "base/functional/bind.h"
++#include "net/base/load_flags.h"
++#include "net/traffic_annotation/network_traffic_annotation.h"
++#include "services/network/public/cpp/resource_request.h"
++#include "services/network/public/cpp/shared_url_loader_factory.h"
++#include "services/network/public/cpp/simple_url_loader.h"
++
++namespace phlink::updater {
++namespace {
++
++// TUF metadata files are tiny (timestamp.json ~ 500 B, snapshot.json
++// usually < 8 KiB, targets.json a few KiB per channel). Cap at 1 MiB so a
++// hostile server can't pin renderer/browser memory.
++constexpr size_t kMaxMetadataBytes = 1 * 1024 * 1024;
++
++constexpr net::NetworkTrafficAnnotationTag kTrafficAnnotation =
++    net::DefineNetworkTrafficAnnotation("phlink_updater_metadata", R"(
++        semantics {
++          sender: "phlink updater"
++          description:
++            "Fetches signed TUF metadata (timestamp.json, snapshot.json, "
++            "targets.json) describing the latest available phlink update. "
++            "Initiated by the browser process on a 24h +/- 6h jittered "
++            "schedule (and once ~5 minutes after startup). All metadata "
++            "is signed; phlink verifies signatures locally before acting "
++            "on it."
++          trigger:
++            "Periodic update check timer."
++          data:
++            "None. Only the metadata file URL is sent. No user identifiers, "
++            "cookies, or auth headers are attached."
++          destination: WEBSITE
++          internal {
++            contacts { email: "updates@phlink.dev" }
++          }
++          user_data { type: NONE }
++          last_reviewed: "2026-04-30"
++        }
++        policy {
++          cookies_allowed: NO
++          setting:
++            "Disable phlink's auto-update by toggling the 'Automatic "
++            "updates' setting under Settings > About phlink."
++          chrome_policy {}
++        })");
++
++const char* StageFile(MetadataFetcher::ResultCallback*) {
++  return "";  // unused; suppresses unused-warning artifact.
++}
++
++}  // namespace
++
++MetadataFetcher::MetadataFetcher(
++    scoped_refptr<network::SharedURLLoaderFactory> factory,
++    GURL base_url)
++    : factory_(std::move(factory)), base_url_(std::move(base_url)) {
++  CHECK(base_url_.is_valid());
++  CHECK(base_url_.spec().back() == '/')
++      << "MetadataFetcher base URL must end with '/'";
++}
++
++MetadataFetcher::~MetadataFetcher() = default;
++
++void MetadataFetcher::Fetch(TufClient* client, ResultCallback callback) {
++  CHECK(client);
++  CHECK(!client_) << "MetadataFetcher is one-shot";
++  client_ = client;
++  callback_ = std::move(callback);
++  StartStage(Stage::kTimestamp);
++}
++
++void MetadataFetcher::StartStage(Stage stage) {
++  const char* relative = nullptr;
++  switch (stage) {
++    case Stage::kTimestamp:
++      relative = "timestamp.json";
++      break;
++    case Stage::kSnapshot:
++      relative = "snapshot.json";
++      break;
++    case Stage::kTargets:
++      relative = "targets.json";
++      break;
++    case Stage::kDone:
++      Finish(TufError::kOk);
++      return;
++  }
++
++  auto request = std::make_unique<network::ResourceRequest>();
++  request->url = base_url_.Resolve(relative);
++  request->method = "GET";
++  // No cookies, no credentials. Strip referer.
++  request->credentials_mode = network::mojom::CredentialsMode::kOmit;
++  request->load_flags =
++      net::LOAD_DISABLE_CACHE | net::LOAD_BYPASS_CACHE | net::LOAD_DO_NOT_SAVE_COOKIES;
++
++  loader_ = network::SimpleURLLoader::Create(std::move(request),
++                                             kTrafficAnnotation);
++  loader_->DownloadToString(
++      factory_.get(),
++      base::BindOnce(&MetadataFetcher::OnDownloaded,
++                     weak_factory_.GetWeakPtr(), stage),
++      kMaxMetadataBytes);
++  // Suppress unused-symbol warning for the helper above (kept as a hook
++  // for future per-stage logging).
++  (void)StageFile;
++}
++
++void MetadataFetcher::OnDownloaded(Stage stage,
++                                   std::optional<std::string> body) {
++  if (!body.has_value()) {
++    Finish(TufError::kBadJson);  // network error -> treat as bad fetch.
++    return;
++  }
++  base::span<const uint8_t> bytes = base::as_byte_span(*body);
++  TufError err = TufError::kOk;
++  Stage next = Stage::kDone;
++  switch (stage) {
++    case Stage::kTimestamp:
++      err = client_->IngestTimestamp(bytes);
++      next = Stage::kSnapshot;
++      break;
++    case Stage::kSnapshot:
++      err = client_->IngestSnapshot(bytes);
++      next = Stage::kTargets;
++      break;
++    case Stage::kTargets:
++      err = client_->IngestTargets(bytes);
++      next = Stage::kDone;
++      break;
++    case Stage::kDone:
++      NOTREACHED();
++  }
++  if (err != TufError::kOk) {
++    Finish(err);
++    return;
++  }
++  StartStage(next);
++}
++
++void MetadataFetcher::Finish(TufError error) {
++  loader_.reset();
++  if (callback_) {
++    std::move(callback_).Run(error);
++  }
++}
++
++}  // namespace phlink::updater
+diff --git a/chrome/browser/phlink/updater/metadata_fetcher.h b/chrome/browser/phlink/updater/metadata_fetcher.h
+new file mode 100644
+index 0000000000000..59c7ee00f79a4
+--- /dev/null
++++ b/chrome/browser/phlink/updater/metadata_fetcher.h
+@@ -0,0 +1,72 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_PHLINK_UPDATER_METADATA_FETCHER_H_
++#define CHROME_BROWSER_PHLINK_UPDATER_METADATA_FETCHER_H_
++
++#include <memory>
++#include <optional>
++#include <string>
++
++#include "base/functional/callback.h"
++#include "base/memory/raw_ptr.h"
++#include "base/memory/scoped_refptr.h"
++#include "base/memory/weak_ptr.h"
++#include "chrome/browser/phlink/updater/metadata_client.h"
++#include "url/gurl.h"
++
++namespace network {
++class SharedURLLoaderFactory;
++class SimpleURLLoader;
++}  // namespace network
++
++namespace phlink::updater {
++
++// Drives a TUF metadata fetch sequence over `network::SimpleURLLoader`:
++// `timestamp.json` -> `snapshot.json` -> `targets.json`. Each downloaded
++// blob is fed to the caller-owned `TufClient`, which performs the TUF
++// signature/expiry/version checks. This object only owns the network
++// plumbing.
++//
++// One-shot. Construct, call `Fetch`, await callback, drop.
++//
++// Out of scope (deferred to plan 10-02d):
++//   * payload (.zip) download.
++//   * staged.json persistence.
++//   * KeyedServiceFactory wiring on the system profile.
++class MetadataFetcher {
++ public:
++  using ResultCallback = base::OnceCallback<void(TufError)>;
++
++  // `base_url` is the directory under which `timestamp.json` etc. live.
++  // A trailing slash is required (asserted at construction).
++  MetadataFetcher(scoped_refptr<network::SharedURLLoaderFactory> factory,
++                  GURL base_url);
++  MetadataFetcher(const MetadataFetcher&) = delete;
++  MetadataFetcher& operator=(const MetadataFetcher&) = delete;
++  ~MetadataFetcher();
++
++  // Starts the fetch. `client` must outlive this `MetadataFetcher`. The
++  // result is reported asynchronously via `callback`. `Fetch` may be
++  // called at most once.
++  void Fetch(TufClient* client, ResultCallback callback);
++
++ private:
++  enum class Stage { kTimestamp, kSnapshot, kTargets, kDone };
++
++  void StartStage(Stage stage);
++  void OnDownloaded(Stage stage, std::optional<std::string> body);
++  void Finish(TufError error);
++
++  scoped_refptr<network::SharedURLLoaderFactory> factory_;
++  const GURL base_url_;
++  std::unique_ptr<network::SimpleURLLoader> loader_;
++  raw_ptr<TufClient> client_ = nullptr;
++  ResultCallback callback_;
++  base::WeakPtrFactory<MetadataFetcher> weak_factory_{this};
++};
++
++}  // namespace phlink::updater
++
++#endif  // CHROME_BROWSER_PHLINK_UPDATER_METADATA_FETCHER_H_
+diff --git a/chrome/browser/phlink/updater/metadata_fetcher_unittest.cc b/chrome/browser/phlink/updater/metadata_fetcher_unittest.cc
+new file mode 100644
+index 0000000000000..10cdf233d7ada
+--- /dev/null
++++ b/chrome/browser/phlink/updater/metadata_fetcher_unittest.cc
+@@ -0,0 +1,134 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/phlink/updater/metadata_fetcher.h"
++
++#include <string>
++
++#include "base/check.h"
++#include "base/run_loop.h"
++#include "base/test/bind.h"
++#include "base/test/task_environment.h"
++#include "base/time/time.h"
++#include "chrome/browser/phlink/updater/metadata_client.h"
++#include "chrome/browser/phlink/updater/metadata_test_helpers.h"
++#include "net/http/http_status_code.h"
++#include "services/network/public/cpp/weak_wrapper_shared_url_loader_factory.h"
++#include "services/network/test/test_url_loader_factory.h"
++#include "testing/gtest/include/gtest/gtest.h"
++#include "url/gurl.h"
++
++namespace phlink::updater {
++namespace {
++
++using test_helpers::BuildRootSigned;
++using test_helpers::BuildSnapshotSigned;
++using test_helpers::BuildTargetsSigned;
++using test_helpers::BuildTimestampSigned;
++using test_helpers::Bytes;
++using test_helpers::Envelope;
++using test_helpers::MakeTestKey;
++using test_helpers::TestKey;
++
++constexpr char kFutureExpires[] = "2099-01-01T00:00:00Z";
++
++base::Time SomeNow() {
++  base::Time t;
++  CHECK(base::Time::FromUTCString("2026-05-01T00:00:00Z", &t));
++  return t;
++}
++
++class MetadataFetcherTest : public ::testing::Test {
++ protected:
++  MetadataFetcherTest()
++      : shared_factory_(loader_factory_.GetSafeWeakWrapper()) {}
++
++  // Returns a TufClient with the trust root parsed and ready to ingest.
++  TufClient MakeClient(const TestKey& root_key) {
++    std::string root_json =
++        Envelope(BuildRootSigned(root_key, kFutureExpires), {&root_key});
++    auto client = TufClient::CreateWithRoot(Bytes(root_json), SomeNow());
++    CHECK(client.has_value());
++    return std::move(client).value();
++  }
++
++  // Primes the fake URL-loader factory with a valid metadata trio under
++  // `kBaseUrl`.
++  void SeedHappyPath(const TestKey& root_key) {
++    std::string snap_json =
++        Envelope(BuildSnapshotSigned(1, kFutureExpires, 1), {&root_key});
++    std::string ts_json = Envelope(
++        BuildTimestampSigned(1, kFutureExpires, 1, snap_json), {&root_key});
++    std::string tgt_json =
++        Envelope(BuildTargetsSigned(1, kFutureExpires), {&root_key});
++    loader_factory_.AddResponse(GURL("https://updates.example/timestamp.json"),
++                                /*head=*/network::mojom::URLResponseHead::New(),
++                                ts_json,
++                                network::URLLoaderCompletionStatus(net::OK));
++    loader_factory_.AddResponse(GURL("https://updates.example/snapshot.json"),
++                                network::mojom::URLResponseHead::New(),
++                                snap_json,
++                                network::URLLoaderCompletionStatus(net::OK));
++    loader_factory_.AddResponse(GURL("https://updates.example/targets.json"),
++                                network::mojom::URLResponseHead::New(),
++                                tgt_json,
++                                network::URLLoaderCompletionStatus(net::OK));
++  }
++
++  TufError RunFetch(TufClient* client) {
++    MetadataFetcher fetcher(shared_factory_,
++                            GURL("https://updates.example/"));
++    base::RunLoop run_loop;
++    TufError result = TufError::kOk;
++    fetcher.Fetch(client,
++                  base::BindLambdaForTesting([&](TufError err) {
++                    result = err;
++                    run_loop.Quit();
++                  }));
++    run_loop.Run();
++    return result;
++  }
++
++  base::test::TaskEnvironment task_env_;
++  network::TestURLLoaderFactory loader_factory_;
++  scoped_refptr<network::WeakWrapperSharedURLLoaderFactory> shared_factory_;
++};
++
++TEST_F(MetadataFetcherTest, HappyPathIngestsAllThreeRoles) {
++  TestKey root = MakeTestKey();
++  TufClient client = MakeClient(root);
++  SeedHappyPath(root);
++
++  EXPECT_EQ(TufError::kOk, RunFetch(&client));
++  EXPECT_EQ(client.timestamp_version(), 1u);
++  EXPECT_EQ(client.snapshot_version(), 1u);
++  EXPECT_EQ(client.targets_version(), 1u);
++  EXPECT_TRUE(client.LookupTarget("phlink-1.0.0-mac-arm64.zip").has_value());
++}
++
++TEST_F(MetadataFetcherTest, NetworkErrorOnTimestampPropagates) {
++  TestKey root = MakeTestKey();
++  TufClient client = MakeClient(root);
++  // Don't seed timestamp.json -- give it a 500 instead. snapshot/targets
++  // are irrelevant since the fetch should bail out at stage 1.
++  loader_factory_.AddResponse("https://updates.example/timestamp.json",
++                              /*content=*/"",
++                              net::HTTP_INTERNAL_SERVER_ERROR);
++
++  EXPECT_NE(TufError::kOk, RunFetch(&client));
++  EXPECT_EQ(client.timestamp_version(), 0u);
++}
++
++TEST_F(MetadataFetcherTest, BadJsonOnTimestampPropagates) {
++  TestKey root = MakeTestKey();
++  TufClient client = MakeClient(root);
++  loader_factory_.AddResponse("https://updates.example/timestamp.json",
++                              "{not valid json", net::HTTP_OK);
++
++  EXPECT_EQ(TufError::kBadJson, RunFetch(&client));
++  EXPECT_EQ(client.timestamp_version(), 0u);
++}
++
++}  // namespace
++}  // namespace phlink::updater
+diff --git a/chrome/browser/phlink/updater/metadata_test_helpers.cc b/chrome/browser/phlink/updater/metadata_test_helpers.cc
+new file mode 100644
+index 0000000000000..4821137359075
+--- /dev/null
++++ b/chrome/browser/phlink/updater/metadata_test_helpers.cc
+@@ -0,0 +1,178 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/phlink/updater/metadata_test_helpers.h"
++
++#include <utility>
++
++#include "base/strings/string_number_conversions.h"
++#include "base/strings/string_util.h"
++#include "chrome/browser/phlink/updater/canonical_json.h"
++#include "crypto/sign.h"
++#include "third_party/boringssl/src/include/openssl/sha.h"
++
++namespace phlink::updater::test_helpers {
++
++TestKey::TestKey()
++    : private_key(crypto::keypair::PrivateKey::GenerateEd25519()) {}
++
++TestKey::TestKey(crypto::keypair::PrivateKey priv,
++                 std::array<uint8_t, 32> pub,
++                 std::string id)
++    : private_key(std::move(priv)),
++      public_bytes(pub),
++      keyid(std::move(id)) {}
++
++TestKey::TestKey(const TestKey&) = default;
++TestKey::TestKey(TestKey&&) = default;
++TestKey& TestKey::operator=(const TestKey&) = default;
++TestKey& TestKey::operator=(TestKey&&) = default;
++TestKey::~TestKey() = default;
++
++std::string ToHex(base::span<const uint8_t> bytes) {
++  return base::ToLowerASCII(base::HexEncode(bytes));
++}
++
++TestKey MakeTestKey() {
++  crypto::keypair::PrivateKey priv =
++      crypto::keypair::PrivateKey::GenerateEd25519();
++  std::array<uint8_t, 32> pub = priv.ToEd25519PublicKey();
++
++  // Compute keyid = sha256(canonical_json({keytype, keyval{public}, scheme})).
++  base::DictValue keyval;
++  keyval.Set("public", ToHex(pub));
++  base::DictValue key_dict;
++  key_dict.Set("keytype", "ed25519");
++  key_dict.Set("keyval", std::move(keyval));
++  key_dict.Set("scheme", "ed25519");
++  base::Value v(std::move(key_dict));
++  std::string canonical = *EncodeCanonicalJson(v);
++
++  std::array<uint8_t, 32> hash{};
++  ::SHA256(reinterpret_cast<const uint8_t*>(canonical.data()),
++           canonical.size(), hash.data());
++
++  return TestKey(std::move(priv), pub, ToHex(hash));
++}
++
++std::string Envelope(const base::DictValue& signed_value,
++                     const std::vector<const TestKey*>& signers) {
++  base::Value v(signed_value.Clone());
++  std::string canonical = *EncodeCanonicalJson(v);
++  base::span<const uint8_t> message = base::as_byte_span(canonical);
++
++  base::ListValue sigs;
++  for (const TestKey* k : signers) {
++    std::vector<uint8_t> sig =
++        crypto::sign::Sign(crypto::sign::ED25519, k->private_key, message);
++    base::DictValue s;
++    s.Set("keyid", k->keyid);
++    s.Set("sig", ToHex(sig));
++    sigs.Append(std::move(s));
++  }
++
++  base::DictValue outer;
++  outer.Set("signed", signed_value.Clone());
++  outer.Set("signatures", std::move(sigs));
++  return *EncodeCanonicalJson(base::Value(std::move(outer)));
++}
++
++base::DictValue BuildRootSigned(const TestKey& root_key,
++                                const std::string& expires) {
++  base::DictValue keyval;
++  keyval.Set("public", ToHex(root_key.public_bytes));
++  base::DictValue key;
++  key.Set("keytype", "ed25519");
++  key.Set("keyval", std::move(keyval));
++  key.Set("scheme", "ed25519");
++  base::DictValue keys;
++  keys.Set(root_key.keyid, std::move(key));
++
++  auto make_role = [&]() {
++    base::ListValue ids;
++    ids.Append(root_key.keyid);
++    base::DictValue r;
++    r.Set("keyids", std::move(ids));
++    r.Set("threshold", 1);
++    return r;
++  };
++  base::DictValue roles;
++  roles.Set("root", make_role());
++  roles.Set("targets", make_role());
++  roles.Set("snapshot", make_role());
++  roles.Set("timestamp", make_role());
++
++  base::DictValue signed_dict;
++  signed_dict.Set("_type", "root");
++  signed_dict.Set("spec_version", "1.0.32");
++  signed_dict.Set("version", 1);
++  signed_dict.Set("expires", expires);
++  signed_dict.Set("consistent_snapshot", false);
++  signed_dict.Set("keys", std::move(keys));
++  signed_dict.Set("roles", std::move(roles));
++  return signed_dict;
++}
++
++base::DictValue BuildTimestampSigned(int version,
++                                     const std::string& expires,
++                                     int snapshot_version,
++                                     const std::string& snapshot_bytes) {
++  std::array<uint8_t, 32> sha{};
++  ::SHA256(reinterpret_cast<const uint8_t*>(snapshot_bytes.data()),
++           snapshot_bytes.size(), sha.data());
++  base::DictValue hashes;
++  hashes.Set("sha256", ToHex(sha));
++  base::DictValue snap_meta;
++  snap_meta.Set("version", snapshot_version);
++  snap_meta.Set("length", static_cast<int>(snapshot_bytes.size()));
++  snap_meta.Set("hashes", std::move(hashes));
++  base::DictValue meta;
++  meta.Set("snapshot.json", std::move(snap_meta));
++  base::DictValue s;
++  s.Set("_type", "timestamp");
++  s.Set("spec_version", "1.0.32");
++  s.Set("version", version);
++  s.Set("expires", expires);
++  s.Set("meta", std::move(meta));
++  return s;
++}
++
++base::DictValue BuildSnapshotSigned(int version,
++                                    const std::string& expires,
++                                    int targets_version) {
++  base::DictValue tgt_meta;
++  tgt_meta.Set("version", targets_version);
++  base::DictValue meta;
++  meta.Set("targets.json", std::move(tgt_meta));
++  base::DictValue s;
++  s.Set("_type", "snapshot");
++  s.Set("spec_version", "1.0.32");
++  s.Set("version", version);
++  s.Set("expires", expires);
++  s.Set("meta", std::move(meta));
++  return s;
++}
++
++base::DictValue BuildTargetsSigned(int version, const std::string& expires) {
++  std::array<uint8_t, 32> fake_sha{};
++  for (size_t i = 0; i < fake_sha.size(); ++i) {
++    fake_sha[i] = static_cast<uint8_t>(i);
++  }
++  base::DictValue hashes;
++  hashes.Set("sha256", ToHex(fake_sha));
++  base::DictValue tgt;
++  tgt.Set("length", 1024);
++  tgt.Set("hashes", std::move(hashes));
++  base::DictValue targets;
++  targets.Set("phlink-1.0.0-mac-arm64.zip", std::move(tgt));
++  base::DictValue s;
++  s.Set("_type", "targets");
++  s.Set("spec_version", "1.0.32");
++  s.Set("version", version);
++  s.Set("expires", expires);
++  s.Set("targets", std::move(targets));
++  return s;
++}
++
++}  // namespace phlink::updater::test_helpers
+diff --git a/chrome/browser/phlink/updater/metadata_test_helpers.h b/chrome/browser/phlink/updater/metadata_test_helpers.h
+new file mode 100644
+index 0000000000000..8aab7e5faf854
+--- /dev/null
++++ b/chrome/browser/phlink/updater/metadata_test_helpers.h
+@@ -0,0 +1,61 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_PHLINK_UPDATER_METADATA_TEST_HELPERS_H_
++#define CHROME_BROWSER_PHLINK_UPDATER_METADATA_TEST_HELPERS_H_
++
++#include <array>
++#include <cstdint>
++#include <string>
++#include <vector>
++
++#include "base/containers/span.h"
++#include "base/values.h"
++#include "crypto/keypair.h"
++
++namespace phlink::updater::test_helpers {
++
++// A single Ed25519 keypair plus its TUF-style key_id.
++struct TestKey {
++  TestKey();
++  TestKey(crypto::keypair::PrivateKey priv,
++          std::array<uint8_t, 32> pub,
++          std::string id);
++  TestKey(const TestKey&);
++  TestKey(TestKey&&);
++  TestKey& operator=(const TestKey&);
++  TestKey& operator=(TestKey&&);
++  ~TestKey();
++
++  crypto::keypair::PrivateKey private_key;
++  std::array<uint8_t, 32> public_bytes{};
++  std::string keyid;
++};
++
++std::string ToHex(base::span<const uint8_t> bytes);
++TestKey MakeTestKey();
++
++// Wraps `signed_value` in a `{ signed, signatures }` envelope, signing it
++// with each of `signers`. Returns canonical-JSON of the outer envelope.
++std::string Envelope(const base::DictValue& signed_value,
++                     const std::vector<const TestKey*>& signers);
++
++base::DictValue BuildRootSigned(const TestKey& root_key,
++                                const std::string& expires);
++base::DictValue BuildTimestampSigned(int version,
++                                     const std::string& expires,
++                                     int snapshot_version,
++                                     const std::string& snapshot_bytes);
++base::DictValue BuildSnapshotSigned(int version,
++                                    const std::string& expires,
++                                    int targets_version);
++base::DictValue BuildTargetsSigned(int version, const std::string& expires);
++
++inline base::span<const uint8_t> Bytes(const std::string& s) {
++  return base::as_byte_span(s);
++}
++
++}  // namespace phlink::updater::test_helpers
++
++#endif  // CHROME_BROWSER_PHLINK_UPDATER_METADATA_TEST_HELPERS_H_
+-- 
+2.50.1 (Apple Git-155)
+
