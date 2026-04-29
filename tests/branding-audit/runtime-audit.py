@@ -46,6 +46,17 @@ SURFACES = [
     "chrome://newtab/",
 ]
 
+# Phase 8.6 (BRND-02): phlink:// scheme alias surfaces. These must
+# resolve (i.e. not net::ERR_*) and pass the same branding rules.
+SURFACES_PHLINK = [
+    "phlink://settings/",
+    "phlink://flags/",
+    "phlink://version/",
+    "phlink://about/",
+    "phlink://newtab/",
+    "phlink://components/",
+]
+
 # Forbidden tokens (case-sensitive word-boundary).
 FORBIDDEN = re.compile(r"\b(Chromium|Google Chrome|Chrome)\b")
 
@@ -214,7 +225,7 @@ def main() -> int:
         ws_url = wait_for_devtools(port, timeout=30.0)
         ws = attach_target(ws_url)
         msg_id = 0
-        for url in SURFACES:
+        for url in SURFACES + SURFACES_PHLINK:
             try:
                 msg_id += 1
                 tgt = new_target(ws, msg_id, url)
