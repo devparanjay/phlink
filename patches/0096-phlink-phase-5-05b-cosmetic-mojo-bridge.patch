@@ -1,0 +1,308 @@
+From dbfd1197c451448989775de1637bfce5b3336c62 Mon Sep 17 00:00:00 2001
+From: phlink <phlink@local>
+Date: Wed, 29 Apr 2026 13:31:16 +0530
+Subject: [PATCH] =?UTF-8?q?phlink:=20phase=205-05b=20=E2=80=94=20cosmetic?=
+ =?UTF-8?q?=20filter=20Mojo=20bridge=20(browser=20side)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Defines chrome/common/phlink_adblock.mojom with a single
+phlink.mojom.AdblockCosmeticFilter interface returning per-URL
+cosmetic resources (hide_selectors, injected_script, generichide).
+
+Adds phlink::adblock::CosmeticFilterHost — a stateless,
+self-owned-receiver implementation registered per-frame in
+PopulateChromeFrameBinders. It looks up the singleton
+EngineProvider's Engine and forwards the GURL to
+Engine::UrlCosmeticResources. Non-http(s) URLs short-circuit
+to empty resources to avoid extension/chrome:// noise.
+
+Build (autoninja chrome): SUCCESS. 10/10 unit tests still green.
+
+Refs PRD §6.1, §10.1 (site isolation stays ON), plan 5-05b.
+---
+ .../chrome_browser_interface_binders.cc       |  8 +++
+ chrome/browser/phlink/adblock/BUILD.gn        | 12 +++-
+ .../phlink/adblock/cosmetic_filter_host.cc    | 67 +++++++++++++++++++
+ .../phlink/adblock/cosmetic_filter_host.h     | 52 ++++++++++++++
+ chrome/common/BUILD.gn                        |  7 ++
+ chrome/common/phlink_adblock.mojom            | 48 +++++++++++++
+ 6 files changed, 192 insertions(+), 2 deletions(-)
+ create mode 100644 chrome/browser/phlink/adblock/cosmetic_filter_host.cc
+ create mode 100644 chrome/browser/phlink/adblock/cosmetic_filter_host.h
+ create mode 100644 chrome/common/phlink_adblock.mojom
+
+diff --git a/chrome/browser/chrome_browser_interface_binders.cc b/chrome/browser/chrome_browser_interface_binders.cc
+index 7e78d75860689..d390d8c2ff815 100644
+--- a/chrome/browser/chrome_browser_interface_binders.cc
++++ b/chrome/browser/chrome_browser_interface_binders.cc
+@@ -27,9 +27,11 @@
+ #include "chrome/browser/profiles/profile_manager.h"
+ #include "chrome/browser/signin/identity_manager_factory.h"
+ #include "chrome/browser/speech/on_device_speech_recognition_impl.h"
++#include "chrome/browser/phlink/adblock/cosmetic_filter_host.h"
+ #include "chrome/browser/translate/translate_frame_binder.h"
+ #include "chrome/browser/ui/search_engines/search_engine_tab_helper.h"
+ #include "chrome/common/buildflags.h"
++#include "chrome/common/phlink_adblock.mojom.h"
+ #include "chrome/common/pref_names.h"
+ #include "chrome/services/speech/buildflags/buildflags.h"
+ #include "components/autofill/content/browser/content_autofill_client.h"
+@@ -440,6 +442,12 @@ void PopulateChromeFrameBinders(
+     content::RenderFrameHost* render_frame_host) {
+   map->Add<image_annotation::mojom::Annotator>(&BindImageAnnotator);
+ 
++  // phlink: cosmetic ad-filtering bridge (plan 5-05b). Renderer requests
++  // per-URL hide selectors + scriptlet text at document-start; the
++  // browser-side host consults `phlink::adblock::EngineProvider`.
++  map->Add<phlink::mojom::AdblockCosmeticFilter>(
++      base::BindRepeating(&phlink::adblock::CosmeticFilterHost::Create));
++
+   map->Add<blink::mojom::ScriptToolHost>(
+       &actor::ActorScriptToolReceiver::Create);
+ 
+diff --git a/chrome/browser/phlink/adblock/BUILD.gn b/chrome/browser/phlink/adblock/BUILD.gn
+index bb6fea37c1cee..2ced0d04635dd 100644
+--- a/chrome/browser/phlink/adblock/BUILD.gn
++++ b/chrome/browser/phlink/adblock/BUILD.gn
+@@ -16,9 +16,12 @@ rust_static_library("phlink_adblock_ffi") {
+ }
+ 
+ # C++ surface. Plan 5-03 wires this into //chrome/browser via the
+-# `PhlinkAdblockThrottle` URLLoaderThrottle.
++# `PhlinkAdblockThrottle` URLLoaderThrottle. Plan 5-05b wires
++# `CosmeticFilterHost` into the per-frame Mojo binder map.
+ source_set("phlink_adblock") {
+   sources = [
++    "cosmetic_filter_host.cc",
++    "cosmetic_filter_host.h",
+     "engine_provider.cc",
+     "engine_provider.h",
+     "phlink_adblock.cc",
+@@ -26,9 +29,14 @@ source_set("phlink_adblock") {
+     "phlink_adblock_throttle.cc",
+     "phlink_adblock_throttle.h",
+   ]
+-  public_deps = [ ":phlink_adblock_ffi" ]
++  public_deps = [
++    ":phlink_adblock_ffi",
++    "//chrome/common:phlink_adblock_mojom",
++  ]
+   deps = [
+     "//base",
++    "//content/public/browser",
++    "//mojo/public/cpp/bindings",
+     "//net",
+     "//services/network/public/cpp",
+     "//services/network/public/mojom:mojom_shared",
+diff --git a/chrome/browser/phlink/adblock/cosmetic_filter_host.cc b/chrome/browser/phlink/adblock/cosmetic_filter_host.cc
+new file mode 100644
+index 0000000000000..0b73c430979bd
+--- /dev/null
++++ b/chrome/browser/phlink/adblock/cosmetic_filter_host.cc
+@@ -0,0 +1,67 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/phlink/adblock/cosmetic_filter_host.h"
++
++#include <memory>
++#include <utility>
++
++#include "chrome/browser/phlink/adblock/engine_provider.h"
++#include "chrome/browser/phlink/adblock/phlink_adblock.h"
++#include "chrome/common/phlink_adblock.mojom.h"
++#include "mojo/public/cpp/bindings/self_owned_receiver.h"
++#include "url/gurl.h"
++
++namespace phlink::adblock {
++
++namespace {
++
++// Cosmetic filtering is meaningless for chrome://, devtools://, etc.
++// Returning empty resources for unsupported URLs short-circuits the
++// hot path on every internal navigation.
++bool ShouldEvaluate(const GURL& url) {
++  return url.is_valid() &&
++         (url.SchemeIs("http") || url.SchemeIs("https"));
++}
++
++}  // namespace
++
++CosmeticFilterHost::CosmeticFilterHost() = default;
++
++CosmeticFilterHost::~CosmeticFilterHost() = default;
++
++// static
++void CosmeticFilterHost::Create(
++    content::RenderFrameHost* /*render_frame_host*/,
++    mojo::PendingReceiver<mojom::AdblockCosmeticFilter> pending_receiver) {
++  mojo::MakeSelfOwnedReceiver(std::make_unique<CosmeticFilterHost>(),
++                              std::move(pending_receiver));
++}
++
++void CosmeticFilterHost::GetCosmeticResources(
++    const GURL& url,
++    GetCosmeticResourcesCallback callback) {
++  auto out = mojom::AdblockCosmeticResources::New();
++  if (!ShouldEvaluate(url)) {
++    std::move(callback).Run(std::move(out));
++    return;
++  }
++
++  Engine* engine = EngineProvider::GetInstance()->GetEngine();
++  // EngineProvider always returns a non-null engine (empty fallback);
++  // guard defensively in case 5-06's pref toggle later returns null.
++  if (!engine) {
++    std::move(callback).Run(std::move(out));
++    return;
++  }
++
++  Engine::CosmeticResources resources =
++      engine->UrlCosmeticResources(url.spec());
++  out->hide_selectors = std::move(resources.hide_selectors);
++  out->injected_script = std::move(resources.injected_script);
++  out->generichide = resources.generichide;
++  std::move(callback).Run(std::move(out));
++}
++
++}  // namespace phlink::adblock
+diff --git a/chrome/browser/phlink/adblock/cosmetic_filter_host.h b/chrome/browser/phlink/adblock/cosmetic_filter_host.h
+new file mode 100644
+index 0000000000000..898b1a3b153f0
+--- /dev/null
++++ b/chrome/browser/phlink/adblock/cosmetic_filter_host.h
+@@ -0,0 +1,52 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_PHLINK_ADBLOCK_COSMETIC_FILTER_HOST_H_
++#define CHROME_BROWSER_PHLINK_ADBLOCK_COSMETIC_FILTER_HOST_H_
++
++#include "chrome/common/phlink_adblock.mojom.h"
++#include "mojo/public/cpp/bindings/pending_receiver.h"
++
++namespace content {
++class RenderFrameHost;
++}  // namespace content
++
++namespace phlink::adblock {
++
++// Browser-process implementation of `phlink::mojom::AdblockCosmeticFilter`.
++//
++// The implementation is stateless: every `GetCosmeticResources` call
++// looks up the singleton `EngineProvider`'s engine and asks it for the
++// per-URL cosmetic resources. We therefore bind each receiver via
++// `mojo::MakeSelfOwnedReceiver` rather than tying lifetime to a
++// `DocumentUserData`, which keeps the binder map's `Add` factory a
++// single line and avoids re-binding edge cases.
++//
++// All engine evaluation stays in the browser process. The renderer
++// receives only the resolved CSS / JS strings, never the rule database
++// (PRD §10.1: "site isolation stays ON").
++class CosmeticFilterHost : public mojom::AdblockCosmeticFilter {
++ public:
++  CosmeticFilterHost();
++  ~CosmeticFilterHost() override;
++
++  CosmeticFilterHost(const CosmeticFilterHost&) = delete;
++  CosmeticFilterHost& operator=(const CosmeticFilterHost&) = delete;
++
++  // Factory for `mojo::BinderMapWithContext` — wraps a fresh
++  // `CosmeticFilterHost` in a self-owned receiver bound to
++  // `pending_receiver`. The `RenderFrameHost*` is unused today but
++  // matches the binder map's expected signature.
++  static void Create(content::RenderFrameHost* render_frame_host,
++                     mojo::PendingReceiver<mojom::AdblockCosmeticFilter>
++                         pending_receiver);
++
++  // mojom::AdblockCosmeticFilter:
++  void GetCosmeticResources(const GURL& url,
++                            GetCosmeticResourcesCallback callback) override;
++};
++
++}  // namespace phlink::adblock
++
++#endif  // CHROME_BROWSER_PHLINK_ADBLOCK_COSMETIC_FILTER_HOST_H_
+diff --git a/chrome/common/BUILD.gn b/chrome/common/BUILD.gn
+index 3b8f9c46804cf..44796800d8866 100644
+--- a/chrome/common/BUILD.gn
++++ b/chrome/common/BUILD.gn
+@@ -180,6 +180,7 @@ static_library("common_lib") {
+     ":ini_parser",
+     ":mojo_bindings",
+     ":offline_page_auto_fetcher_mojom",
++    ":phlink_adblock_mojom",
+     ":request_code_constants",
+     ":supervised_user_commands_mojom",
+     ":url_constants",
+@@ -816,3 +817,9 @@ mojom("offline_page_auto_fetcher_mojom") {
+   sources = [ "offline_page_auto_fetcher.mojom" ]
+   public_deps = [ "//url/mojom:url_mojom_gurl" ]
+ }
++
++# phlink cosmetic ad-filtering bridge (renderer ↔ browser).
++mojom("phlink_adblock_mojom") {
++  sources = [ "phlink_adblock.mojom" ]
++  public_deps = [ "//url/mojom:url_mojom_gurl" ]
++}
+diff --git a/chrome/common/phlink_adblock.mojom b/chrome/common/phlink_adblock.mojom
+new file mode 100644
+index 0000000000000..475996d68c403
+--- /dev/null
++++ b/chrome/common/phlink_adblock.mojom
+@@ -0,0 +1,48 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// Renderer ↔ browser plumbing for phlink's cosmetic ad-filtering.
++//
++// The renderer's `RenderFrameObserver` (plan 5-05c) asks the browser
++// process for the per-URL cosmetic resources at document-start. The
++// browser consults `phlink::adblock::Engine::UrlCosmeticResources` and
++// returns the hide-selector list + scriptlet text.
++//
++// All evaluation stays in the browser process to honor PRD §10.1's
++// "site isolation stays ON" rule: the renderer never sees the engine
++// or the rule database.
++module phlink.mojom;
++
++import "url/mojom/url.mojom";
++
++// Per-frame cosmetic resources resolved from the matching ruleset.
++//
++// `hide_selectors` is the union of generic and host-scoped CSS
++// selectors that the renderer should join into a single
++// `display: none !important;` stylesheet. They are returned in
++// stable (sorted) order so equality checks in tests are robust.
++//
++// `injected_script` is the concatenated text of any uBO-style
++// `+js(...)` scriptlets to evaluate at document-start. Empty when
++// no scriptlets match.
++//
++// `generichide` is true when a `$generichide` exception applies to
++// the document's URL — the renderer should drop generic (non host-
++// scoped) selectors before applying the stylesheet.
++struct AdblockCosmeticResources {
++  array<string> hide_selectors;
++  string injected_script;
++  bool generichide;
++};
++
++// Renderer-facing interface implemented by `CosmeticFilterHost` in
++// the browser process and bound per-RenderFrameHost.
++interface AdblockCosmeticFilter {
++  // Returns the cosmetic resources for `url` (the document URL of
++  // the requesting frame). The browser MAY return empty resources
++  // if adblock is disabled, the engine is not yet warm, or the URL
++  // is not eligible for cosmetic filtering (e.g. a chrome:// URL).
++  GetCosmeticResources(url.mojom.Url url)
++      => (AdblockCosmeticResources resources);
++};
+-- 
+2.50.1 (Apple Git-155)
+
