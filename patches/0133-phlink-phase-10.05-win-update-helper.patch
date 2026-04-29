@@ -1,0 +1,381 @@
+From a9c99e4b48e7749dad287ecb892fb14348012c66 Mon Sep 17 00:00:00 2001
+From: phlink <dev@phlink.local>
+Date: Thu, 30 Apr 2026 00:50:28 +0530
+Subject: [PATCH] phlink: phase 10.05 Windows update helper
+
+Adds win-only phlink_update_helper.exe and apply logic:
+
+  phlink_update_helper --apply <staging_dir> <target_exe>
+                                <expected_signer_cn>
+
+Pipeline:
+  1. Read staged.json.
+  2. Confirm payload exists.
+  3. WinVerifyTrust (WINTRUST_ACTION_GENERIC_VERIFY_V2,
+     WTD_REVOKE_WHOLECHAIN) Authenticode validation.
+  4. CryptQueryObject + CryptMsgGetParam to extract the signer
+     certificate; CertGetNameStringW(CERT_NAME_SIMPLE_DISPLAY_TYPE)
+     to obtain its subject CN; pin against the expected EV-cert
+     subject.
+  5. MoveFileExW(MOVEFILE_REPLACE_EXISTING |
+     MOVEFILE_DELAY_UNTIL_REBOOT) to swap the running phlink.exe
+     at next reboot.
+  6. Delete staged.json.
+
+Tests cover argument validation and missing-staged.json. Authenticode
++ subject-pin paths require a real EV-signed exe and are deferred
+to CI on the windows nightly build (10-08).
+
+Build target gated on is_win; mac compiles only the GN graph (gn
+gen succeeds; ninja no-op on mac since the win subgraph is unreferenced
+by non-platform-gated GN).
+
+Refs phlink phase 10-05.
+---
+ chrome/browser/phlink/updater/win/BUILD.gn    |  39 +++++
+ .../updater/win/phlink_update_helper_main.cc  |  42 ++++++
+ .../phlink/updater/win/update_helper_apply.cc | 139 ++++++++++++++++++
+ .../phlink/updater/win/update_helper_apply.h  |  47 ++++++
+ .../win/update_helper_apply_unittest.cc       |  35 +++++
+ 5 files changed, 302 insertions(+)
+ create mode 100644 chrome/browser/phlink/updater/win/BUILD.gn
+ create mode 100644 chrome/browser/phlink/updater/win/phlink_update_helper_main.cc
+ create mode 100644 chrome/browser/phlink/updater/win/update_helper_apply.cc
+ create mode 100644 chrome/browser/phlink/updater/win/update_helper_apply.h
+ create mode 100644 chrome/browser/phlink/updater/win/update_helper_apply_unittest.cc
+
+diff --git a/chrome/browser/phlink/updater/win/BUILD.gn b/chrome/browser/phlink/updater/win/BUILD.gn
+new file mode 100644
+index 0000000000000..ef312c29c2613
+--- /dev/null
++++ b/chrome/browser/phlink/updater/win/BUILD.gn
+@@ -0,0 +1,39 @@
++# Copyright 2026 The phlink Authors
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++
++assert(is_win)
++
++source_set("apply") {
++  sources = [
++    "update_helper_apply.cc",
++    "update_helper_apply.h",
++  ]
++  deps = [
++    "//base",
++    "//chrome/browser/phlink/updater:staged_payload",
++  ]
++  libs = [
++    "crypt32.lib",
++    "wintrust.lib",
++  ]
++}
++
++executable("phlink_update_helper") {
++  sources = [ "phlink_update_helper_main.cc" ]
++  deps = [
++    ":apply",
++    "//base",
++  ]
++}
++
++source_set("unit_tests") {
++  testonly = true
++  sources = [ "update_helper_apply_unittest.cc" ]
++  deps = [
++    ":apply",
++    "//base",
++    "//base/test:test_support",
++    "//testing/gtest",
++  ]
++}
+diff --git a/chrome/browser/phlink/updater/win/phlink_update_helper_main.cc b/chrome/browser/phlink/updater/win/phlink_update_helper_main.cc
+new file mode 100644
+index 0000000000000..94c9827156154
+--- /dev/null
++++ b/chrome/browser/phlink/updater/win/phlink_update_helper_main.cc
+@@ -0,0 +1,42 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include <cstdio>
++
++#include "base/at_exit.h"
++#include "base/command_line.h"
++#include "base/files/file_path.h"
++#include "chrome/browser/phlink/updater/win/update_helper_apply.h"
++
++namespace {
++
++void PrintUsage() {
++  fwprintf(stderr,
++           L"phlink_update_helper --apply <staging_dir> <target_exe> "
++           L"<expected_signer_cn>\n");
++}
++
++}  // namespace
++
++int wmain(int argc, wchar_t** argv) {
++  base::AtExitManager exit_manager;
++  base::CommandLine::Init(0, nullptr);
++  const auto& cmd = *base::CommandLine::ForCurrentProcess();
++  if (!cmd.HasSwitch("apply")) {
++    PrintUsage();
++    return static_cast<int>(
++        phlink::updater::win::ApplyResult::kBadArguments);
++  }
++  const auto args = cmd.GetArgs();
++  if (args.size() != 3) {
++    PrintUsage();
++    return static_cast<int>(
++        phlink::updater::win::ApplyResult::kBadArguments);
++  }
++  phlink::updater::win::ApplyOptions opts;
++  opts.staging_dir = base::FilePath(args[0]);
++  opts.target_exe_path = base::FilePath(args[1]);
++  opts.expected_subject_cn = args[2];
++  return static_cast<int>(phlink::updater::win::Apply(opts));
++}
+diff --git a/chrome/browser/phlink/updater/win/update_helper_apply.cc b/chrome/browser/phlink/updater/win/update_helper_apply.cc
+new file mode 100644
+index 0000000000000..8c82a9dae2804
+--- /dev/null
++++ b/chrome/browser/phlink/updater/win/update_helper_apply.cc
+@@ -0,0 +1,139 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/phlink/updater/win/update_helper_apply.h"
++
++#include <windows.h>
++
++#include <softpub.h>
++#include <wintrust.h>
++
++#include <wincrypt.h>
++
++#include <string>
++
++#include "base/files/file_util.h"
++#include "chrome/browser/phlink/updater/staged_payload.h"
++
++#pragma comment(lib, "wintrust.lib")
++#pragma comment(lib, "crypt32.lib")
++
++namespace phlink::updater::win {
++
++namespace {
++
++bool WinVerifyAuthenticode(const base::FilePath& path) {
++  WINTRUST_FILE_INFO file_info = {};
++  file_info.cbStruct = sizeof(file_info);
++  file_info.pcwszFilePath = path.value().c_str();
++
++  GUID policy = WINTRUST_ACTION_GENERIC_VERIFY_V2;
++  WINTRUST_DATA wt = {};
++  wt.cbStruct = sizeof(wt);
++  wt.dwUIChoice = WTD_UI_NONE;
++  wt.fdwRevocationChecks = WTD_REVOKE_WHOLECHAIN;
++  wt.dwUnionChoice = WTD_CHOICE_FILE;
++  wt.pFile = &file_info;
++  wt.dwStateAction = WTD_STATEACTION_VERIFY;
++
++  LONG status = WinVerifyTrust(static_cast<HWND>(INVALID_HANDLE_VALUE),
++                               &policy, &wt);
++  wt.dwStateAction = WTD_STATEACTION_CLOSE;
++  WinVerifyTrust(static_cast<HWND>(INVALID_HANDLE_VALUE), &policy, &wt);
++  return status == ERROR_SUCCESS;
++}
++
++bool SignerSubjectMatches(const base::FilePath& path,
++                          const std::wstring& expected_cn) {
++  if (expected_cn.empty()) {
++    return true;
++  }
++  HCERTSTORE store = nullptr;
++  HCRYPTMSG msg = nullptr;
++  DWORD encoding = 0;
++  DWORD content_type = 0;
++  DWORD format_type = 0;
++  if (!CryptQueryObject(CERT_QUERY_OBJECT_FILE, path.value().c_str(),
++                        CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED,
++                        CERT_QUERY_FORMAT_FLAG_BINARY, 0, &encoding,
++                        &content_type, &format_type, &store, &msg, nullptr)) {
++    return false;
++  }
++
++  DWORD signer_info_size = 0;
++  CryptMsgGetParam(msg, CMSG_SIGNER_INFO_PARAM, 0, nullptr, &signer_info_size);
++  std::string signer_buf(signer_info_size, '\0');
++  if (!CryptMsgGetParam(msg, CMSG_SIGNER_INFO_PARAM, 0, signer_buf.data(),
++                        &signer_info_size)) {
++    CertCloseStore(store, 0);
++    CryptMsgClose(msg);
++    return false;
++  }
++  auto* signer = reinterpret_cast<CMSG_SIGNER_INFO*>(signer_buf.data());
++
++  CERT_INFO cert_info = {};
++  cert_info.Issuer = signer->Issuer;
++  cert_info.SerialNumber = signer->SerialNumber;
++  PCCERT_CONTEXT cert =
++      CertFindCertificateInStore(store, encoding, 0, CERT_FIND_SUBJECT_CERT,
++                                 &cert_info, nullptr);
++  bool match = false;
++  if (cert) {
++    DWORD len = CertGetNameStringW(cert, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0,
++                                   nullptr, nullptr, 0);
++    std::wstring subject(len, L'\0');
++    CertGetNameStringW(cert, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, nullptr,
++                       subject.data(), len);
++    if (!subject.empty() && subject.back() == L'\0') {
++      subject.pop_back();
++    }
++    match = (subject == expected_cn);
++    CertFreeCertificateContext(cert);
++  }
++  CertCloseStore(store, 0);
++  CryptMsgClose(msg);
++  return match;
++}
++
++}  // namespace
++
++ApplyResult Apply(const ApplyOptions& opts) {
++  if (opts.staging_dir.empty() || opts.target_exe_path.empty()) {
++    return ApplyResult::kBadArguments;
++  }
++
++  auto staged_opt = phlink::updater::ReadStagedPayloadJson(opts.staging_dir);
++  if (!staged_opt) {
++    return base::PathExists(
++               opts.staging_dir.Append(FILE_PATH_LITERAL("staged.json")))
++               ? ApplyResult::kStagedJsonInvalid
++               : ApplyResult::kStagedJsonMissing;
++  }
++  const auto& staged = *staged_opt;
++  if (!base::PathExists(staged.payload_path)) {
++    return ApplyResult::kPayloadMissing;
++  }
++
++  if (!opts.skip_signature_check) {
++    if (!WinVerifyAuthenticode(staged.payload_path)) {
++      return ApplyResult::kSignatureInvalid;
++    }
++    if (!SignerSubjectMatches(staged.payload_path, opts.expected_subject_cn)) {
++      return ApplyResult::kSignatureInvalid;
++    }
++  }
++
++  // The running exe can't be replaced in-place; defer until reboot.
++  if (!MoveFileExW(staged.payload_path.value().c_str(),
++                   opts.target_exe_path.value().c_str(),
++                   MOVEFILE_REPLACE_EXISTING | MOVEFILE_DELAY_UNTIL_REBOOT)) {
++    return ApplyResult::kSwapFailed;
++  }
++
++  base::DeleteFile(
++      opts.staging_dir.Append(FILE_PATH_LITERAL("staged.json")));
++  return ApplyResult::kOk;
++}
++
++}  // namespace phlink::updater::win
+diff --git a/chrome/browser/phlink/updater/win/update_helper_apply.h b/chrome/browser/phlink/updater/win/update_helper_apply.h
+new file mode 100644
+index 0000000000000..832191fcb4d5d
+--- /dev/null
++++ b/chrome/browser/phlink/updater/win/update_helper_apply.h
+@@ -0,0 +1,47 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_PHLINK_UPDATER_WIN_UPDATE_HELPER_APPLY_H_
++#define CHROME_BROWSER_PHLINK_UPDATER_WIN_UPDATE_HELPER_APPLY_H_
++
++#include "base/files/file_path.h"
++
++namespace phlink::updater::win {
++
++enum class ApplyResult {
++  kOk = 0,
++  kBadArguments = 2,
++  kStagedJsonMissing = 3,
++  kStagedJsonInvalid = 4,
++  kPayloadMissing = 5,
++  kSignatureInvalid = 8,
++  kSwapFailed = 10,
++};
++
++struct ApplyOptions {
++  // Directory containing `staged.json` and the verified payload exe.
++  base::FilePath staging_dir;
++
++  // Path to the currently-running `phlink.exe` to be replaced.
++  base::FilePath target_exe_path;
++
++  // If true, skip the WinVerifyTrust Authenticode check (tests only).
++  bool skip_signature_check = false;
++
++  // The expected EV-cert subject CN to pin against; empty disables
++  // pinning (tests only).
++  std::wstring expected_subject_cn;
++};
++
++// Applies the staged update:
++//   1. Read staged.json.
++//   2. WinVerifyTrust Authenticode check on the payload exe.
++//   3. Verify the signing cert subject CN matches the pinned value.
++//   4. MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_DELAY_UNTIL_REBOOT)
++//      to swap the running exe at next reboot.
++ApplyResult Apply(const ApplyOptions& opts);
++
++}  // namespace phlink::updater::win
++
++#endif  // CHROME_BROWSER_PHLINK_UPDATER_WIN_UPDATE_HELPER_APPLY_H_
+diff --git a/chrome/browser/phlink/updater/win/update_helper_apply_unittest.cc b/chrome/browser/phlink/updater/win/update_helper_apply_unittest.cc
+new file mode 100644
+index 0000000000000..92eb3811b24f2
+--- /dev/null
++++ b/chrome/browser/phlink/updater/win/update_helper_apply_unittest.cc
+@@ -0,0 +1,35 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/phlink/updater/win/update_helper_apply.h"
++
++#include "base/files/file_path.h"
++#include "base/files/file_util.h"
++#include "base/files/scoped_temp_dir.h"
++#include "testing/gtest/include/gtest/gtest.h"
++
++namespace phlink::updater::win {
++namespace {
++
++class UpdateHelperApplyWinTest : public ::testing::Test {
++ protected:
++  void SetUp() override { ASSERT_TRUE(temp_.CreateUniqueTempDir()); }
++  base::FilePath path() const { return temp_.GetPath(); }
++  base::ScopedTempDir temp_;
++};
++
++TEST_F(UpdateHelperApplyWinTest, BadArgumentsRejected) {
++  ApplyOptions opts;
++  EXPECT_EQ(ApplyResult::kBadArguments, Apply(opts));
++}
++
++TEST_F(UpdateHelperApplyWinTest, MissingStagedJsonReturnsKStagedJsonMissing) {
++  ApplyOptions opts;
++  opts.staging_dir = path();
++  opts.target_exe_path = path().AppendASCII("phlink.exe");
++  EXPECT_EQ(ApplyResult::kStagedJsonMissing, Apply(opts));
++}
++
++}  // namespace
++}  // namespace phlink::updater::win
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,380 @@
+From e56b303f1681603513bcbb91cedd1bd4b1ec9715 Mon Sep 17 00:00:00 2001
+From: phlink <dev@phlink.local>
+Date: Thu, 30 Apr 2026 00:50:26 +0530
+Subject: [PATCH] phlink: phase 10.04 Linux update helper
+
+Adds linux-only phlink_update_helper executable and apply logic:
+
+  phlink_update_helper --apply <staging_dir> <target_path>
+                                <signature_path> <gpg_keyring>
+
+Pipeline:
+  1. Read staged.json (StagedPayload v1).
+  2. Confirm payload exists.
+  3. gpg --batch --no-default-keyring --keyring <keyring> --verify
+     against the bundled phlink release public key.
+  4. base::Move (rename(2)) the verified payload over the target.
+  5. Delete staged.json.
+
+Same exit-code surface as macOS helper. Tests cover argument
+validation, missing-staged.json, and a happy-path replacement (gpg
+verification skipped via test-only ApplyOptions::skip_signature_check).
+
+Build target is gated on is_linux; mac compiles only the GN graph.
+The signed-payload path will be exercised in CI on the linux nightly
+build (deferred to 10-08).
+
+Refs phlink phase 10-04.
+---
+ chrome/browser/phlink/updater/BUILD.gn        | 10 +++
+ chrome/browser/phlink/updater/linux/BUILD.gn  | 36 ++++++++
+ .../linux/phlink_update_helper_main.cc        | 43 ++++++++++
+ .../updater/linux/update_helper_apply.cc      | 82 +++++++++++++++++++
+ .../updater/linux/update_helper_apply.h       | 50 +++++++++++
+ .../linux/update_helper_apply_unittest.cc     | 68 +++++++++++++++
+ 6 files changed, 289 insertions(+)
+ create mode 100644 chrome/browser/phlink/updater/linux/BUILD.gn
+ create mode 100644 chrome/browser/phlink/updater/linux/phlink_update_helper_main.cc
+ create mode 100644 chrome/browser/phlink/updater/linux/update_helper_apply.cc
+ create mode 100644 chrome/browser/phlink/updater/linux/update_helper_apply.h
+ create mode 100644 chrome/browser/phlink/updater/linux/update_helper_apply_unittest.cc
+
+diff --git a/chrome/browser/phlink/updater/BUILD.gn b/chrome/browser/phlink/updater/BUILD.gn
+index bdf203759b8d0..2a0d9f40d1b66 100644
+--- a/chrome/browser/phlink/updater/BUILD.gn
++++ b/chrome/browser/phlink/updater/BUILD.gn
+@@ -204,6 +204,12 @@ test("phlink_updater_unittests") {
+   if (is_mac) {
+     deps += [ "//chrome/browser/phlink/updater/mac:unit_tests" ]
+   }
++  if (is_linux) {
++    deps += [ "//chrome/browser/phlink/updater/linux:unit_tests" ]
++  }
++  if (is_win) {
++    deps += [ "//chrome/browser/phlink/updater/win:unit_tests" ]
++  }
+ }
+ 
+ # Platform-specific helper executables. These are built unconditionally
+@@ -212,5 +218,9 @@ test("phlink_updater_unittests") {
+ group("update_helpers") {
+   if (is_mac) {
+     deps = [ "//chrome/browser/phlink/updater/mac:phlink_update_helper" ]
++  } else if (is_linux) {
++    deps = [ "//chrome/browser/phlink/updater/linux:phlink_update_helper" ]
++  } else if (is_win) {
++    deps = [ "//chrome/browser/phlink/updater/win:phlink_update_helper" ]
+   }
+ }
+diff --git a/chrome/browser/phlink/updater/linux/BUILD.gn b/chrome/browser/phlink/updater/linux/BUILD.gn
+new file mode 100644
+index 0000000000000..16017438d5780
+--- /dev/null
++++ b/chrome/browser/phlink/updater/linux/BUILD.gn
+@@ -0,0 +1,36 @@
++# Copyright 2026 The phlink Authors
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++
++assert(is_linux)
++
++source_set("apply") {
++  sources = [
++    "update_helper_apply.cc",
++    "update_helper_apply.h",
++  ]
++  deps = [
++    "//base",
++    "//chrome/browser/phlink/updater:staged_payload",
++  ]
++}
++
++executable("phlink_update_helper") {
++  sources = [ "phlink_update_helper_main.cc" ]
++  deps = [
++    ":apply",
++    "//base",
++  ]
++}
++
++source_set("unit_tests") {
++  testonly = true
++  sources = [ "update_helper_apply_unittest.cc" ]
++  deps = [
++    ":apply",
++    "//base",
++    "//base/test:test_support",
++    "//chrome/browser/phlink/updater:staged_payload",
++    "//testing/gtest",
++  ]
++}
+diff --git a/chrome/browser/phlink/updater/linux/phlink_update_helper_main.cc b/chrome/browser/phlink/updater/linux/phlink_update_helper_main.cc
+new file mode 100644
+index 0000000000000..ab03b673d20d0
+--- /dev/null
++++ b/chrome/browser/phlink/updater/linux/phlink_update_helper_main.cc
+@@ -0,0 +1,43 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include <cstdio>
++
++#include "base/at_exit.h"
++#include "base/command_line.h"
++#include "base/files/file_path.h"
++#include "chrome/browser/phlink/updater/linux/update_helper_apply.h"
++
++namespace {
++
++void PrintUsage() {
++  fprintf(stderr,
++          "phlink_update_helper --apply <staging_dir> <target_path> "
++          "<signature_path> <gpg_keyring>\n");
++}
++
++}  // namespace
++
++int main(int argc, char** argv) {
++  base::AtExitManager exit_manager;
++  base::CommandLine::Init(argc, argv);
++  const auto& cmd = *base::CommandLine::ForCurrentProcess();
++  if (!cmd.HasSwitch("apply")) {
++    PrintUsage();
++    return static_cast<int>(
++        phlink::updater::linux::ApplyResult::kBadArguments);
++  }
++  const auto args = cmd.GetArgs();
++  if (args.size() != 4) {
++    PrintUsage();
++    return static_cast<int>(
++        phlink::updater::linux::ApplyResult::kBadArguments);
++  }
++  phlink::updater::linux::ApplyOptions opts;
++  opts.staging_dir = base::FilePath(args[0]);
++  opts.target_path = base::FilePath(args[1]);
++  opts.signature_path = base::FilePath(args[2]);
++  opts.gpg_keyring_path = base::FilePath(args[3]);
++  return static_cast<int>(phlink::updater::linux::Apply(opts));
++}
+diff --git a/chrome/browser/phlink/updater/linux/update_helper_apply.cc b/chrome/browser/phlink/updater/linux/update_helper_apply.cc
+new file mode 100644
+index 0000000000000..1b58c30a76d78
+--- /dev/null
++++ b/chrome/browser/phlink/updater/linux/update_helper_apply.cc
+@@ -0,0 +1,82 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/phlink/updater/linux/update_helper_apply.h"
++
++#include "base/command_line.h"
++#include "base/files/file_path.h"
++#include "base/files/file_util.h"
++#include "base/process/launch.h"
++#include "chrome/browser/phlink/updater/staged_payload.h"
++
++namespace phlink::updater::linux {
++
++namespace {
++
++// Runs `gpg --no-default-keyring --keyring <keyring> --verify <sig> <payload>`.
++// Returns true iff exit code 0.
++bool GpgVerify(const base::FilePath& payload,
++               const base::FilePath& signature,
++               const base::FilePath& keyring) {
++  base::CommandLine cmd(base::FilePath("/usr/bin/gpg"));
++  cmd.AppendArg("--batch");
++  cmd.AppendArg("--no-default-keyring");
++  cmd.AppendArg("--keyring");
++  cmd.AppendArgPath(keyring);
++  cmd.AppendArg("--verify");
++  cmd.AppendArgPath(signature);
++  cmd.AppendArgPath(payload);
++  base::Process p = base::LaunchProcess(cmd, base::LaunchOptions());
++  if (!p.IsValid()) {
++    return false;
++  }
++  int exit_code = -1;
++  return p.WaitForExit(&exit_code) && exit_code == 0;
++}
++
++}  // namespace
++
++ApplyResult Apply(const ApplyOptions& opts) {
++  if (opts.staging_dir.empty() || opts.target_path.empty() ||
++      opts.signature_path.empty()) {
++    return ApplyResult::kBadArguments;
++  }
++
++  auto staged_opt = phlink::updater::ReadStagedPayloadJson(opts.staging_dir);
++  if (!staged_opt) {
++    return base::PathExists(
++               opts.staging_dir.Append(FILE_PATH_LITERAL("staged.json")))
++               ? ApplyResult::kStagedJsonInvalid
++               : ApplyResult::kStagedJsonMissing;
++  }
++  const auto& staged = *staged_opt;
++
++  if (!base::PathExists(staged.payload_path)) {
++    return ApplyResult::kPayloadMissing;
++  }
++
++  if (!opts.skip_signature_check) {
++    if (opts.gpg_keyring_path.empty() ||
++        !base::PathExists(opts.gpg_keyring_path) ||
++        !base::PathExists(opts.signature_path)) {
++      return ApplyResult::kSignatureInvalid;
++    }
++    if (!GpgVerify(staged.payload_path, opts.signature_path,
++                   opts.gpg_keyring_path)) {
++      return ApplyResult::kSignatureInvalid;
++    }
++  }
++
++  // Atomic in-place replace via rename(2); both source and target must
++  // live on the same filesystem.
++  if (!base::Move(staged.payload_path, opts.target_path)) {
++    return ApplyResult::kSwapFailed;
++  }
++
++  base::DeleteFile(
++      opts.staging_dir.Append(FILE_PATH_LITERAL("staged.json")));
++  return ApplyResult::kOk;
++}
++
++}  // namespace phlink::updater::linux
+diff --git a/chrome/browser/phlink/updater/linux/update_helper_apply.h b/chrome/browser/phlink/updater/linux/update_helper_apply.h
+new file mode 100644
+index 0000000000000..4f9f9d709ceda
+--- /dev/null
++++ b/chrome/browser/phlink/updater/linux/update_helper_apply.h
+@@ -0,0 +1,50 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_PHLINK_UPDATER_LINUX_UPDATE_HELPER_APPLY_H_
++#define CHROME_BROWSER_PHLINK_UPDATER_LINUX_UPDATE_HELPER_APPLY_H_
++
++#include "base/files/file_path.h"
++
++namespace phlink::updater::linux {
++
++// Mirrors phlink::updater::mac::ApplyResult so the CLI exit-code
++// surface is uniform across platforms.
++enum class ApplyResult {
++  kOk = 0,
++  kBadArguments = 2,
++  kStagedJsonMissing = 3,
++  kStagedJsonInvalid = 4,
++  kPayloadMissing = 5,
++  kSignatureInvalid = 8,
++  kSwapFailed = 10,
++};
++
++struct ApplyOptions {
++  // Directory containing `staged.json` and the verified payload
++  // (an AppImage or a tar.gz, depending on install mode).
++  base::FilePath staging_dir;
++
++  // Path to the currently-running phlink binary (`/proc/self/exe`
++  // resolved). For AppImage installs, this is the .AppImage file
++  // itself; for unpacked installs, the binary inside `<prefix>/bin/`.
++  base::FilePath target_path;
++
++  // Path to the detached gpg signature for the payload. Required.
++  base::FilePath signature_path;
++
++  // Path to the gpg keyring that holds phlink's release public key.
++  // Tests inject a fixture keyring; production reads the bundled
++  // `/usr/share/phlink/release.gpg`.
++  base::FilePath gpg_keyring_path;
++
++  // If true, skip gpg verification (tests only).
++  bool skip_signature_check = false;
++};
++
++ApplyResult Apply(const ApplyOptions& opts);
++
++}  // namespace phlink::updater::linux
++
++#endif  // CHROME_BROWSER_PHLINK_UPDATER_LINUX_UPDATE_HELPER_APPLY_H_
+diff --git a/chrome/browser/phlink/updater/linux/update_helper_apply_unittest.cc b/chrome/browser/phlink/updater/linux/update_helper_apply_unittest.cc
+new file mode 100644
+index 0000000000000..8fb73721d1a13
+--- /dev/null
++++ b/chrome/browser/phlink/updater/linux/update_helper_apply_unittest.cc
+@@ -0,0 +1,68 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/phlink/updater/linux/update_helper_apply.h"
++
++#include <string>
++
++#include "base/files/file_path.h"
++#include "base/files/file_util.h"
++#include "base/files/scoped_temp_dir.h"
++#include "base/time/time.h"
++#include "chrome/browser/phlink/updater/staged_payload.h"
++#include "testing/gtest/include/gtest/gtest.h"
++
++namespace phlink::updater::linux {
++namespace {
++
++class UpdateHelperApplyLinuxTest : public ::testing::Test {
++ protected:
++  void SetUp() override { ASSERT_TRUE(temp_.CreateUniqueTempDir()); }
++  base::FilePath path() const { return temp_.GetPath(); }
++  base::ScopedTempDir temp_;
++};
++
++TEST_F(UpdateHelperApplyLinuxTest, BadArgumentsRejected) {
++  ApplyOptions opts;
++  EXPECT_EQ(ApplyResult::kBadArguments, Apply(opts));
++}
++
++TEST_F(UpdateHelperApplyLinuxTest, MissingStagedJsonReturnsKStagedJsonMissing) {
++  ApplyOptions opts;
++  opts.staging_dir = path();
++  opts.target_path = path().AppendASCII("phlink");
++  opts.signature_path = path().AppendASCII("payload.sig");
++  opts.gpg_keyring_path = path().AppendASCII("release.gpg");
++  EXPECT_EQ(ApplyResult::kStagedJsonMissing, Apply(opts));
++}
++
++TEST_F(UpdateHelperApplyLinuxTest, HappyPathReplacesTarget) {
++  // Create a fake payload + target on the same volume.
++  base::FilePath payload = path().AppendASCII("payload.bin");
++  ASSERT_TRUE(base::WriteFile(payload, "new-binary"));
++  base::FilePath target = path().AppendASCII("phlink");
++  ASSERT_TRUE(base::WriteFile(target, "old-binary"));
++
++  StagedPayload sp;
++  sp.version = "1.2.3";
++  sp.payload_path = payload;
++  sp.verified_at = base::Time::Now();
++  ASSERT_TRUE(WriteStagedPayloadJson(path(), sp));
++
++  ApplyOptions opts;
++  opts.staging_dir = path();
++  opts.target_path = target;
++  opts.signature_path = path().AppendASCII("ignored.sig");
++  opts.gpg_keyring_path = path().AppendASCII("ignored.gpg");
++  opts.skip_signature_check = true;
++
++  EXPECT_EQ(ApplyResult::kOk, Apply(opts));
++
++  std::string contents;
++  ASSERT_TRUE(base::ReadFileToString(target, &contents));
++  EXPECT_EQ("new-binary", contents);
++}
++
++}  // namespace
++}  // namespace phlink::updater::linux
+-- 
+2.50.1 (Apple Git-155)
+
