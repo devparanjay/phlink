@@ -1,0 +1,933 @@
+From 82d989d39b49398f689e44318bd9ecaa9e53a301 Mon Sep 17 00:00:00 2001
+From: phlink <phlink@local>
+Date: Wed, 29 Apr 2026 22:36:08 +0530
+Subject: [PATCH] phlink: phase 9 plan 09-02b chunk 2 chrome://portability
+ WebUI
+
+---
+ chrome/browser/phlink/portability/BUILD.gn    |  22 ++-
+ .../phlink/portability/exporter_impl.cc       | 158 ++++++++++++++++++
+ .../phlink/portability/exporter_impl.h        |  70 ++++++++
+ .../phlink/portability/portability.mojom      |   8 +
+ chrome/browser/resources/BUILD.gn             |   1 +
+ chrome/browser/resources/portability/BUILD.gn |  35 ++++
+ chrome/browser/resources/portability/app.css  |  75 +++++++++
+ chrome/browser/resources/portability/app.html |  53 ++++++
+ chrome/browser/resources/portability/app.ts   |  98 +++++++++++
+ .../resources/portability/browser_proxy.ts    |  15 ++
+ .../resources/portability/portability.html    |  13 ++
+ .../resources/portability/portability.ts      |   5 +
+ chrome/browser/ui/webui/BUILD.gn              |   1 +
+ .../browser/ui/webui/chrome_web_ui_configs.cc |   2 +
+ chrome/browser/ui/webui/portability/BUILD.gn  |  20 +++
+ .../ui/webui/portability/portability_ui.cc    |  58 +++++++
+ .../ui/webui/portability/portability_ui.h     |  46 +++++
+ chrome/chrome_paks.gni                        |   1 +
+ chrome/common/webui_url_constants.cc          |   1 +
+ chrome/common/webui_url_constants.h           |   3 +
+ third_party/lit/v3_0/BUILD.gn                 |   1 +
+ tools/gritsettings/resource_ids.spec          |   4 +
+ 22 files changed, 689 insertions(+), 1 deletion(-)
+ create mode 100644 chrome/browser/phlink/portability/exporter_impl.cc
+ create mode 100644 chrome/browser/phlink/portability/exporter_impl.h
+ create mode 100644 chrome/browser/resources/portability/BUILD.gn
+ create mode 100644 chrome/browser/resources/portability/app.css
+ create mode 100644 chrome/browser/resources/portability/app.html
+ create mode 100644 chrome/browser/resources/portability/app.ts
+ create mode 100644 chrome/browser/resources/portability/browser_proxy.ts
+ create mode 100644 chrome/browser/resources/portability/portability.html
+ create mode 100644 chrome/browser/resources/portability/portability.ts
+ create mode 100644 chrome/browser/ui/webui/portability/BUILD.gn
+ create mode 100644 chrome/browser/ui/webui/portability/portability_ui.cc
+ create mode 100644 chrome/browser/ui/webui/portability/portability_ui.h
+
+diff --git a/chrome/browser/phlink/portability/BUILD.gn b/chrome/browser/phlink/portability/BUILD.gn
+index 0b7c904fb692e..419e4ea3181bb 100644
+--- a/chrome/browser/phlink/portability/BUILD.gn
++++ b/chrome/browser/phlink/portability/BUILD.gn
+@@ -50,10 +50,11 @@ source_set("bundle_codec") {
+   ]
+ }
+ 
+-# WebUI ↔ browser interface for plan 09-02b (Settings Export card).
++# WebUI ↔ browser interface for plan 09-02b (chrome://portability).
+ mojom("portability_mojom") {
+   sources = [ "portability.mojom" ]
+   public_deps = [ "//mojo/public/mojom/base" ]
++  webui_module_path = "/"
+ }
+ 
+ # Profile-decoupled export driver. Takes a profile_dir + dest_path and
+@@ -69,6 +70,25 @@ source_set("export_service") {
+   ]
+ }
+ 
++# Profile-aware mojo Exporter implementation that drives `:export_service`
++# and exposes a SelectFileDialog-backed Save-As to chrome://portability.
++source_set("exporter_impl") {
++  sources = [
++    "exporter_impl.cc",
++    "exporter_impl.h",
++  ]
++  deps = [
++    ":export_service",
++    ":portability_mojom",
++    "//base",
++    "//chrome/browser/profiles:profile",
++    "//chrome/browser/ui/select_file_policy",
++    "//content/public/browser",
++    "//mojo/public/cpp/bindings",
++    "//ui/shell_dialogs",
++  ]
++}
++
+ source_set("unit_tests") {
+   testonly = true
+   sources = [
+diff --git a/chrome/browser/phlink/portability/exporter_impl.cc b/chrome/browser/phlink/portability/exporter_impl.cc
+new file mode 100644
+index 0000000000000..8432e3916a3d8
+--- /dev/null
++++ b/chrome/browser/phlink/portability/exporter_impl.cc
+@@ -0,0 +1,158 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/phlink/portability/exporter_impl.h"
++
++#include <string>
++#include <utility>
++
++#include "base/functional/bind.h"
++#include "base/task/task_traits.h"
++#include "base/task/thread_pool.h"
++#include "chrome/browser/phlink/portability/export_service.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/ui/select_file_policy/chrome_select_file_policy.h"
++#include "content/public/browser/browser_thread.h"
++#include "content/public/browser/web_contents.h"
++#include "ui/shell_dialogs/select_file_dialog.h"
++#include "ui/shell_dialogs/selected_file_info.h"
++
++namespace phlink::portability {
++namespace {
++
++mojom::ExportStatus ToMojom(ExportStatus s) {
++  switch (s) {
++    case ExportStatus::kOk:
++      return mojom::ExportStatus::kOk;
++    case ExportStatus::kCodecFailure:
++      return mojom::ExportStatus::kCodecFailure;
++    case ExportStatus::kIoFailure:
++      return mojom::ExportStatus::kIoFailure;
++    case ExportStatus::kBadPassphrase:
++      return mojom::ExportStatus::kBadPassphrase;
++  }
++}
++
++ExportStatus RunExportOnWorker(base::FilePath profile_dir,
++                               base::FilePath dest,
++                               std::string passphrase) {
++  return ExportProfileToBundle(profile_dir, dest, passphrase);
++}
++
++}  // namespace
++
++ExporterImpl::ExporterImpl(content::WebContents* web_contents,
++                           mojo::PendingReceiver<mojom::Exporter> receiver)
++    : content::WebContentsObserver(web_contents),
++      receiver_(this, std::move(receiver)) {
++  Profile* profile =
++      Profile::FromBrowserContext(web_contents->GetBrowserContext());
++  profile_dir_ = profile->GetPath();
++}
++
++ExporterImpl::~ExporterImpl() {
++  if (select_file_dialog_) {
++    select_file_dialog_->ListenerDestroyed();
++  }
++  if (pending_picker_callback_) {
++    std::move(pending_picker_callback_)
++        .Run(mojom::ExportStatus::kIoFailure, base::FilePath());
++  }
++}
++
++void ExporterImpl::ObserveProgress(
++    mojo::PendingRemote<mojom::ProgressObserver> observer) {
++  progress_observer_.reset();
++  progress_observer_.Bind(std::move(observer));
++}
++
++void ExporterImpl::Export(const std::string& passphrase,
++                          const base::FilePath& path,
++                          ExportCallback callback) {
++  base::ThreadPool::PostTaskAndReplyWithResult(
++      FROM_HERE,
++      {base::MayBlock(), base::TaskPriority::USER_BLOCKING,
++       base::TaskShutdownBehavior::SKIP_ON_SHUTDOWN},
++      base::BindOnce(&RunExportOnWorker, profile_dir_, path, passphrase),
++      base::BindOnce(
++          [](ExportCallback cb, ExportStatus s) {
++            std::move(cb).Run(ToMojom(s));
++          },
++          std::move(callback)));
++}
++
++void ExporterImpl::ExportToPickedFile(const std::string& passphrase,
++                                      ExportToPickedFileCallback callback) {
++  if (pending_picker_callback_) {
++    // Reject overlapping picks.
++    std::move(callback).Run(mojom::ExportStatus::kIoFailure, base::FilePath());
++    return;
++  }
++  if (passphrase.empty()) {
++    std::move(callback).Run(mojom::ExportStatus::kBadPassphrase,
++                            base::FilePath());
++    return;
++  }
++
++  content::WebContents* wc = web_contents();
++  if (!wc) {
++    std::move(callback).Run(mojom::ExportStatus::kIoFailure, base::FilePath());
++    return;
++  }
++
++  pending_picker_callback_ = std::move(callback);
++  pending_passphrase_ = passphrase;
++
++  select_file_dialog_ = ui::SelectFileDialog::Create(
++      this, std::make_unique<ChromeSelectFilePolicy>(wc));
++  ui::SelectFileDialog::FileTypeInfo file_types;
++  file_types.extensions = {{FILE_PATH_LITERAL("phlinkbundle")}};
++  file_types.include_all_files = true;
++
++  base::FilePath default_path =
++      base::FilePath(FILE_PATH_LITERAL("phlink-profile.phlinkbundle"));
++
++  select_file_dialog_->SelectFile(
++      ui::SelectFileDialog::SELECT_SAVEAS_FILE,
++      /*title=*/std::u16string(), default_path, &file_types,
++      /*file_type_index=*/1, FILE_PATH_LITERAL("phlinkbundle"),
++      wc->GetTopLevelNativeWindow());
++}
++
++void ExporterImpl::FileSelected(const ui::SelectedFileInfo& file, int index) {
++  select_file_dialog_.reset();
++  base::FilePath path = file.path();
++  base::ThreadPool::PostTaskAndReplyWithResult(
++      FROM_HERE,
++      {base::MayBlock(), base::TaskPriority::USER_BLOCKING,
++       base::TaskShutdownBehavior::SKIP_ON_SHUTDOWN},
++      base::BindOnce(&RunExportOnWorker, profile_dir_, path,
++                     std::move(pending_passphrase_)),
++      base::BindOnce(
++          [](base::WeakPtr<ExporterImpl> self, base::FilePath p,
++             ExportStatus s) {
++            if (self) {
++              self->OnPickedExportFinished(std::move(p), ToMojom(s));
++            }
++          },
++          weak_factory_.GetWeakPtr(), path));
++}
++
++void ExporterImpl::FileSelectionCanceled() {
++  select_file_dialog_.reset();
++  pending_passphrase_.clear();
++  if (pending_picker_callback_) {
++    std::move(pending_picker_callback_)
++        .Run(mojom::ExportStatus::kIoFailure, base::FilePath());
++  }
++}
++
++void ExporterImpl::OnPickedExportFinished(base::FilePath path,
++                                          mojom::ExportStatus status) {
++  if (pending_picker_callback_) {
++    std::move(pending_picker_callback_).Run(status, path);
++  }
++}
++
++}  // namespace phlink::portability
+diff --git a/chrome/browser/phlink/portability/exporter_impl.h b/chrome/browser/phlink/portability/exporter_impl.h
+new file mode 100644
+index 0000000000000..d982b96e566ba
+--- /dev/null
++++ b/chrome/browser/phlink/portability/exporter_impl.h
+@@ -0,0 +1,70 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_PHLINK_PORTABILITY_EXPORTER_IMPL_H_
++#define CHROME_BROWSER_PHLINK_PORTABILITY_EXPORTER_IMPL_H_
++
++#include <string>
++
++#include "base/files/file_path.h"
++#include "base/memory/weak_ptr.h"
++#include "chrome/browser/phlink/portability/portability.mojom.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "mojo/public/cpp/bindings/pending_receiver.h"
++#include "mojo/public/cpp/bindings/pending_remote.h"
++#include "mojo/public/cpp/bindings/receiver.h"
++#include "mojo/public/cpp/bindings/remote.h"
++#include "ui/shell_dialogs/select_file_dialog.h"
++
++namespace content {
++class WebContents;
++}  // namespace content
++
++namespace phlink::portability {
++
++// Browser-process implementation of `phlink.portability.mojom.Exporter`,
++// backed by `ExportProfileToBundle`. One instance per chrome://portability
++// WebUI tab; lifetime is bounded by the mojo receiver pipe.
++class ExporterImpl : public mojom::Exporter,
++                     public ui::SelectFileDialog::Listener,
++                     public content::WebContentsObserver {
++ public:
++  ExporterImpl(content::WebContents* web_contents,
++               mojo::PendingReceiver<mojom::Exporter> receiver);
++  ExporterImpl(const ExporterImpl&) = delete;
++  ExporterImpl& operator=(const ExporterImpl&) = delete;
++  ~ExporterImpl() override;
++
++  // mojom::Exporter:
++  void ObserveProgress(
++      mojo::PendingRemote<mojom::ProgressObserver> observer) override;
++  void Export(const std::string& passphrase,
++              const base::FilePath& path,
++              ExportCallback callback) override;
++  void ExportToPickedFile(const std::string& passphrase,
++                          ExportToPickedFileCallback callback) override;
++
++  // ui::SelectFileDialog::Listener:
++  void FileSelected(const ui::SelectedFileInfo& file, int index) override;
++  void FileSelectionCanceled() override;
++
++ private:
++  void OnPickedExportFinished(base::FilePath path,
++                              mojom::ExportStatus status);
++
++  base::FilePath profile_dir_;
++  mojo::Receiver<mojom::Exporter> receiver_;
++  mojo::Remote<mojom::ProgressObserver> progress_observer_;
++
++  // State for the in-flight ExportToPickedFile round-trip.
++  scoped_refptr<ui::SelectFileDialog> select_file_dialog_;
++  ExportToPickedFileCallback pending_picker_callback_;
++  std::string pending_passphrase_;
++
++  base::WeakPtrFactory<ExporterImpl> weak_factory_{this};
++};
++
++}  // namespace phlink::portability
++
++#endif  // CHROME_BROWSER_PHLINK_PORTABILITY_EXPORTER_IMPL_H_
+diff --git a/chrome/browser/phlink/portability/portability.mojom b/chrome/browser/phlink/portability/portability.mojom
+index 41b429d290b52..24e8d9b3c50d6 100644
+--- a/chrome/browser/phlink/portability/portability.mojom
++++ b/chrome/browser/phlink/portability/portability.mojom
+@@ -42,4 +42,12 @@ interface Exporter {
+   // Replies once the file is fully on disk (or a failure occurred).
+   Export(string passphrase, mojo_base.mojom.FilePath path)
+       => (ExportStatus status);
++
++  // Convenience entry point for the chrome://portability WebUI: opens
++  // the platform Save-As dialog (anchored to the WebUI's window),
++  // then runs the same export. If the user cancels, replies with
++  // `kIoFailure` and `path` empty. The picked path is returned so the
++  // UI can display it (the WebUI never invents filenames).
++  ExportToPickedFile(string passphrase)
++      => (ExportStatus status, mojo_base.mojom.FilePath path);
+ };
+diff --git a/chrome/browser/resources/BUILD.gn b/chrome/browser/resources/BUILD.gn
+index c725d67cc27f4..c016d93be683a 100644
+--- a/chrome/browser/resources/BUILD.gn
++++ b/chrome/browser/resources/BUILD.gn
+@@ -62,6 +62,7 @@ group("resources") {
+       "new_tab_shared:resources",
+       "omnibox_popup:resources",
+       "password_manager:resources",
++      "portability:resources",
+       "privacy_sandbox/internals:resources",
+       "private_ai_internals:resources",
+       "profile_internals:resources",
+diff --git a/chrome/browser/resources/portability/BUILD.gn b/chrome/browser/resources/portability/BUILD.gn
+new file mode 100644
+index 0000000000000..f3841fde92cfa
+--- /dev/null
++++ b/chrome/browser/resources/portability/BUILD.gn
+@@ -0,0 +1,35 @@
++# Copyright 2026 The phlink Authors
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++
++import("//ui/webui/resources/tools/build_webui.gni")
++
++assert(!is_android || is_desktop_android)
++
++build_webui("build") {
++  grd_prefix = "portability"
++
++  static_files = [ "portability.html" ]
++
++  ts_files = [
++    "browser_proxy.ts",
++    "portability.ts",
++  ]
++
++  web_component_files = [ "app.ts" ]
++  css_files = [ "app.css" ]
++
++  mojo_files_deps =
++      [ "//chrome/browser/phlink/portability:portability_mojom_ts__generator" ]
++  mojo_files = [ "$root_gen_dir/chrome/browser/phlink/portability/portability.mojom-webui.ts" ]
++
++  ts_composite = true
++  ts_deps = [
++    "//third_party/lit/v3_0:build_ts",
++    "//ui/webui/resources/cr_elements:build_ts",
++    "//ui/webui/resources/js:build_ts",
++    "//ui/webui/resources/mojo:build_ts",
++  ]
++
++  webui_context_type = "trusted"
++}
+diff --git a/chrome/browser/resources/portability/app.css b/chrome/browser/resources/portability/app.css
+new file mode 100644
+index 0000000000000..891eb9854c561
+--- /dev/null
++++ b/chrome/browser/resources/portability/app.css
+@@ -0,0 +1,75 @@
++/* Copyright 2026 The phlink Authors
++ * Use of this source code is governed by a BSD-style license that can be
++ * found in the LICENSE file. */
++
++/* #css_wrapper_metadata_start
++ * #type=style-lit
++ * #scheme=relative
++ * #css_wrapper_metadata_end */
++
++:host {
++  display: block;
++  color: var(--cr-primary-text-color);
++  font-family: system-ui, sans-serif;
++}
++
++#page {
++  margin: 0 auto;
++  max-width: 720px;
++  padding: 32px 24px;
++}
++
++header h1 {
++  font-size: 1.6rem;
++  margin: 0 0 8px;
++}
++
++header p {
++  color: var(--cr-secondary-text-color);
++  margin: 0 0 24px;
++}
++
++.card {
++  background: var(--cr-card-background-color, #fff);
++  border: 1px solid var(--cr-separator-color, #dadce0);
++  border-radius: 12px;
++  margin-bottom: 16px;
++  padding: 20px 24px;
++}
++
++.card h2 {
++  font-size: 1.1rem;
++  margin: 0 0 8px;
++}
++
++.muted {
++  color: var(--cr-secondary-text-color);
++}
++
++.includes {
++  margin: 12px 0;
++}
++
++.includes ul {
++  margin: 8px 0 0 16px;
++  padding: 0;
++}
++
++cr-input {
++  display: block;
++  margin-top: 16px;
++}
++
++.actions {
++  display: flex;
++  justify-content: flex-end;
++  margin-top: 16px;
++}
++
++.status {
++  margin-top: 16px;
++}
++
++.card.disabled {
++  opacity: 0.6;
++}
+diff --git a/chrome/browser/resources/portability/app.html b/chrome/browser/resources/portability/app.html
+new file mode 100644
+index 0000000000000..1467a3e7b43c0
+--- /dev/null
++++ b/chrome/browser/resources/portability/app.html
+@@ -0,0 +1,53 @@
++<div id="page">
++  <header>
++    <h1>$i18n{title}</h1>
++    <p>$i18n{description}</p>
++  </header>
++
++  <section class="card">
++    <h2>$i18n{exportHeading}</h2>
++    <p class="muted">$i18n{exportBlurb}</p>
++
++    <details class="includes">
++      <summary>$i18n{includesSummary}</summary>
++      <ul>
++        <li>Bookmarks</li>
++        <li>Preferences</li>
++        <li>History</li>
++        <li>Web Data</li>
++      </ul>
++    </details>
++
++    <cr-input id="passphrase"
++              type="password"
++              label="$i18n{passphraseLabel}"
++              .value="${this.passphrase_}"
++              @value-changed="${this.onPassphraseValueChanged_}"
++              ?disabled="${this.busy_}">
++    </cr-input>
++
++    <cr-input id="confirm"
++              type="password"
++              label="$i18n{confirmLabel}"
++              .value="${this.confirm_}"
++              @value-changed="${this.onConfirmValueChanged_}"
++              ?disabled="${this.busy_}">
++    </cr-input>
++
++    <div class="actions">
++      <cr-button class="action-button"
++                 ?disabled="${!this.canExport_()}"
++                 @click="${this.onExportClick_}">
++        $i18n{exportButton}
++      </cr-button>
++    </div>
++
++    <p class="status" ?hidden="${!this.lastStatus_}">${this.lastStatus_}</p>
++    <p class="status muted" ?hidden="${!this.lastPath_}">${this.lastPath_}</p>
++  </section>
++
++  <section class="card disabled">
++    <h2>$i18n{importHeading}</h2>
++    <p class="muted">$i18n{importBlurb}</p>
++  </section>
++</div>
+diff --git a/chrome/browser/resources/portability/app.ts b/chrome/browser/resources/portability/app.ts
+new file mode 100644
+index 0000000000000..4652e5c42464f
+--- /dev/null
++++ b/chrome/browser/resources/portability/app.ts
+@@ -0,0 +1,98 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++import 'chrome://resources/cr_elements/cr_button/cr_button.js';
++import 'chrome://resources/cr_elements/cr_input/cr_input.js';
++
++import {CrLitElement} from 'chrome://resources/lit/v3_0/lit.rollup.js';
++
++import {getCss} from './app.css.js';
++import {getHtml} from './app.html.js';
++import {getExporter} from './browser_proxy.js';
++import {ExportStatus} from './portability.mojom-webui.js';
++
++export class AppElement extends CrLitElement {
++  static get is() {
++    return 'portability-app';
++  }
++
++  static override get styles() {
++    return getCss();
++  }
++
++  override render() {
++    return getHtml.bind(this)();
++  }
++
++  static override get properties() {
++    return {
++      passphrase_: {type: String},
++      confirm_: {type: String},
++      busy_: {type: Boolean, reflect: true},
++      lastStatus_: {type: String},
++      lastPath_: {type: String},
++    };
++  }
++
++  protected accessor passphrase_: string = '';
++  protected accessor confirm_: string = '';
++  protected accessor busy_: boolean = false;
++  protected accessor lastStatus_: string = '';
++  protected accessor lastPath_: string = '';
++
++  protected onPassphraseValueChanged_(e: CustomEvent<{value: string}>) {
++    this.passphrase_ = e.detail.value;
++  }
++
++  protected onConfirmValueChanged_(e: CustomEvent<{value: string}>) {
++    this.confirm_ = e.detail.value;
++  }
++
++  protected canExport_(): boolean {
++    return !this.busy_ && this.passphrase_.length > 0 &&
++        this.passphrase_ === this.confirm_;
++  }
++
++  protected async onExportClick_() {
++    if (!this.canExport_()) {
++      return;
++    }
++    this.busy_ = true;
++    this.lastStatus_ = '';
++    this.lastPath_ = '';
++    try {
++      const {status, path} = await getExporter().exportToPickedFile(
++          this.passphrase_);
++      this.lastStatus_ = this.statusToString_(status);
++      this.lastPath_ = path.path || '';
++    } finally {
++      this.busy_ = false;
++      this.passphrase_ = '';
++      this.confirm_ = '';
++    }
++  }
++
++  private statusToString_(status: ExportStatus): string {
++    switch (status) {
++      case ExportStatus.kOk:
++        return 'Export complete.';
++      case ExportStatus.kBadPassphrase:
++        return 'Passphrase rejected.';
++      case ExportStatus.kCodecFailure:
++        return 'Bundle codec failed.';
++      case ExportStatus.kIoFailure:
++        return 'Cancelled or filesystem write failed.';
++      default:
++        return 'Unknown error.';
++    }
++  }
++}
++
++declare global {
++  interface HTMLElementTagNameMap {
++    'portability-app': AppElement;
++  }
++}
++
++customElements.define(AppElement.is, AppElement);
+diff --git a/chrome/browser/resources/portability/browser_proxy.ts b/chrome/browser/resources/portability/browser_proxy.ts
+new file mode 100644
+index 0000000000000..b25a9632d3b84
+--- /dev/null
++++ b/chrome/browser/resources/portability/browser_proxy.ts
+@@ -0,0 +1,15 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++import type {ExporterRemote} from './portability.mojom-webui.js';
++import {Exporter} from './portability.mojom-webui.js';
++
++let exporter: ExporterRemote|null = null;
++
++export function getExporter(): ExporterRemote {
++  if (!exporter) {
++    exporter = Exporter.getRemote();
++  }
++  return exporter;
++}
+diff --git a/chrome/browser/resources/portability/portability.html b/chrome/browser/resources/portability/portability.html
+new file mode 100644
+index 0000000000000..513681a4f1aeb
+--- /dev/null
++++ b/chrome/browser/resources/portability/portability.html
+@@ -0,0 +1,13 @@
++<!doctype html>
++<html dir="$i18n{textdirection}" lang="$i18n{language}">
++  <head>
++    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
++    <meta name="color-scheme" content="light dark">
++    <title>$i18n{title}</title>
++    <link rel="stylesheet" href="chrome://resources/css/text_defaults.css">
++  </head>
++  <body>
++    <script type="module" src="portability.js"></script>
++    <portability-app></portability-app>
++  </body>
++</html>
+diff --git a/chrome/browser/resources/portability/portability.ts b/chrome/browser/resources/portability/portability.ts
+new file mode 100644
+index 0000000000000..87ccdb19cbd94
+--- /dev/null
++++ b/chrome/browser/resources/portability/portability.ts
+@@ -0,0 +1,5 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++import './app.js';
+diff --git a/chrome/browser/ui/webui/BUILD.gn b/chrome/browser/ui/webui/BUILD.gn
+index afde514dfb8bd..ca48bbc416fdc 100644
+--- a/chrome/browser/ui/webui/BUILD.gn
++++ b/chrome/browser/ui/webui/BUILD.gn
+@@ -58,6 +58,7 @@ source_set("configs") {
+     "//chrome/browser/ui/webui/actor_internals",
+     "//chrome/browser/ui/webui/autofill_and_password_manager_internals",
+     "//chrome/browser/ui/webui/internal_debug_pages_disabled",
++    "//chrome/browser/ui/webui/portability",
+     "//chrome/browser/ui/webui/regional_capabilities_internals",
+     "//components/compose:buildflags",
+     "//components/lens:buildflags",
+diff --git a/chrome/browser/ui/webui/chrome_web_ui_configs.cc b/chrome/browser/ui/webui/chrome_web_ui_configs.cc
+index 26cd499ca7913..d8c4f2db641c5 100644
+--- a/chrome/browser/ui/webui/chrome_web_ui_configs.cc
++++ b/chrome/browser/ui/webui/chrome_web_ui_configs.cc
+@@ -46,6 +46,7 @@
+ #include "chrome/browser/ui/webui/ntp_tiles_internals_ui.h"
+ #include "chrome/browser/ui/webui/omnibox/omnibox_ui.h"
+ #include "chrome/browser/ui/webui/policy/policy_ui.h"
++#include "chrome/browser/ui/webui/portability/portability_ui.h"
+ #include "chrome/browser/ui/webui/predictors/predictors_ui.h"
+ #include "chrome/browser/ui/webui/privacy_sandbox/privacy_sandbox_internals_ui.h"
+ #include "chrome/browser/ui/webui/regional_capabilities_internals/regional_capabilities_internals_ui.h"
+@@ -284,6 +285,7 @@ void RegisterChromeWebUIConfigs() {
+   map.AddWebUIConfig(std::make_unique<OptimizationGuideInternalsUIConfig>());
+   map.AddWebUIConfig(std::make_unique<PasswordManagerInternalsUIConfig>());
+   map.AddWebUIConfig(std::make_unique<PolicyUIConfig>());
++  map.AddWebUIConfig(std::make_unique<PortabilityUIConfig>());
+   map.AddWebUIConfig(std::make_unique<PredictorsUIConfig>());
+   map.AddWebUIConfig(
+       std::make_unique<
+diff --git a/chrome/browser/ui/webui/portability/BUILD.gn b/chrome/browser/ui/webui/portability/BUILD.gn
+new file mode 100644
+index 0000000000000..1f347f58fc1bb
+--- /dev/null
++++ b/chrome/browser/ui/webui/portability/BUILD.gn
+@@ -0,0 +1,20 @@
++# Copyright 2026 The phlink Authors
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++
++source_set("portability") {
++  sources = [
++    "portability_ui.cc",
++    "portability_ui.h",
++  ]
++  deps = [
++    "//chrome/browser/phlink/portability:exporter_impl",
++    "//chrome/browser/phlink/portability:portability_mojom",
++    "//chrome/browser/profiles:profile",
++    "//chrome/browser/resources/portability:resources",
++    "//chrome/common:constants",
++    "//content/public/browser",
++    "//mojo/public/cpp/bindings",
++    "//ui/webui",
++  ]
++}
+diff --git a/chrome/browser/ui/webui/portability/portability_ui.cc b/chrome/browser/ui/webui/portability/portability_ui.cc
+new file mode 100644
+index 0000000000000..bba78bc46dc90
+--- /dev/null
++++ b/chrome/browser/ui/webui/portability/portability_ui.cc
+@@ -0,0 +1,58 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/ui/webui/portability/portability_ui.h"
++
++#include "chrome/browser/phlink/portability/exporter_impl.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/grit/portability_resources.h"
++#include "chrome/grit/portability_resources_map.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_ui.h"
++#include "content/public/browser/web_ui_data_source.h"
++#include "ui/webui/webui_util.h"
++
++PortabilityUI::PortabilityUI(content::WebUI* web_ui)
++    : ui::MojoWebUIController(web_ui) {
++  Profile* profile = Profile::FromWebUI(web_ui);
++  content::WebUIDataSource* source = content::WebUIDataSource::CreateAndAdd(
++      profile, chrome::kChromeUIPortabilityHost);
++
++  static constexpr struct {
++    const char* name;
++    const char* value;
++  } kStrings[] = {
++      {"title", "phlink Profile Portability"},
++      {"description",
++       "Export your phlink profile to an encrypted bundle, or import a "
++       "previously exported bundle."},
++      {"exportHeading", "Export"},
++      {"exportBlurb",
++       "Pack your bookmarks, preferences, and history into a single sealed "
++       "file. The bundle is encrypted with your passphrase using Argon2id and "
++       "XChaCha20-Poly1305."},
++      {"includesSummary", "What's included"},
++      {"passphraseLabel", "Passphrase"},
++      {"confirmLabel", "Confirm passphrase"},
++      {"exportButton", "Save bundle…"},
++      {"importHeading", "Import"},
++      {"importBlurb", "Import support is coming in a follow-up release."},
++  };
++  for (const auto& s : kStrings) {
++    source->AddString(s.name, s.value);
++  }
++
++  webui::SetupWebUIDataSource(source, kPortabilityResources,
++                              IDR_PORTABILITY_PORTABILITY_HTML);
++}
++
++PortabilityUI::~PortabilityUI() = default;
++
++void PortabilityUI::BindInterface(
++    mojo::PendingReceiver<phlink::portability::mojom::Exporter> receiver) {
++  exporter_ = std::make_unique<phlink::portability::ExporterImpl>(
++      web_ui()->GetWebContents(), std::move(receiver));
++}
++
++WEB_UI_CONTROLLER_TYPE_IMPL(PortabilityUI)
+diff --git a/chrome/browser/ui/webui/portability/portability_ui.h b/chrome/browser/ui/webui/portability/portability_ui.h
+new file mode 100644
+index 0000000000000..1316a16807eda
+--- /dev/null
++++ b/chrome/browser/ui/webui/portability/portability_ui.h
+@@ -0,0 +1,46 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_UI_WEBUI_PORTABILITY_PORTABILITY_UI_H_
++#define CHROME_BROWSER_UI_WEBUI_PORTABILITY_PORTABILITY_UI_H_
++
++#include <memory>
++
++#include "chrome/browser/phlink/portability/portability.mojom.h"
++#include "chrome/common/webui_url_constants.h"
++#include "content/public/browser/internal_webui_config.h"
++#include "mojo/public/cpp/bindings/pending_receiver.h"
++#include "ui/webui/mojo_web_ui_controller.h"
++
++namespace phlink::portability {
++class ExporterImpl;
++}  // namespace phlink::portability
++
++class PortabilityUI;
++
++class PortabilityUIConfig
++    : public content::DefaultInternalWebUIConfig<PortabilityUI> {
++ public:
++  PortabilityUIConfig()
++      : DefaultInternalWebUIConfig(chrome::kChromeUIPortabilityHost) {}
++};
++
++// Controller for chrome://portability — phlink's profile export/import UI.
++class PortabilityUI : public ui::MojoWebUIController {
++ public:
++  explicit PortabilityUI(content::WebUI* web_ui);
++  PortabilityUI(const PortabilityUI&) = delete;
++  PortabilityUI& operator=(const PortabilityUI&) = delete;
++  ~PortabilityUI() override;
++
++  void BindInterface(
++      mojo::PendingReceiver<phlink::portability::mojom::Exporter> receiver);
++
++ private:
++  std::unique_ptr<phlink::portability::ExporterImpl> exporter_;
++
++  WEB_UI_CONTROLLER_TYPE_DECL();
++};
++
++#endif  // CHROME_BROWSER_UI_WEBUI_PORTABILITY_PORTABILITY_UI_H_
+diff --git a/chrome/chrome_paks.gni b/chrome/chrome_paks.gni
+index 584f559f8fa31..0fdb42b943531 100644
+--- a/chrome/chrome_paks.gni
++++ b/chrome/chrome_paks.gni
+@@ -229,6 +229,7 @@ template("chrome_extra_paks") {
+         "$root_gen_dir/chrome/new_tab_shared_resources.pak",
+         "$root_gen_dir/chrome/omnibox_popup_resources.pak",
+         "$root_gen_dir/chrome/password_manager_resources.pak",
++        "$root_gen_dir/chrome/portability_resources.pak",
+         "$root_gen_dir/chrome/private_ai_internals_resources.pak",
+         "$root_gen_dir/chrome/profile_internals_resources.pak",
+         "$root_gen_dir/chrome/search_engine_choice_resources.pak",
+diff --git a/chrome/common/webui_url_constants.cc b/chrome/common/webui_url_constants.cc
+index dd37ab85cec11..72fe3e7a6c042 100644
+--- a/chrome/common/webui_url_constants.cc
++++ b/chrome/common/webui_url_constants.cc
+@@ -165,6 +165,7 @@ base::span<const base::cstring_view> ChromeURLHosts() {
+       kChromeUIPasswordManagerInternalsHost,
+       password_manager::kChromeUIPasswordManagerHost,
+       kChromeUIPolicyHost,
++      kChromeUIPortabilityHost,
+       kChromeUIPredictorsHost,
+       kChromeUIPrefsInternalsHost,
+       kChromeUIProfileInternalsHost,
+diff --git a/chrome/common/webui_url_constants.h b/chrome/common/webui_url_constants.h
+index 35e4f27aaff2f..aa58858fe4500 100644
+--- a/chrome/common/webui_url_constants.h
++++ b/chrome/common/webui_url_constants.h
+@@ -257,6 +257,9 @@ inline constexpr char kChromeUIPolicyHost[] = "policy";
+ inline constexpr char kChromeUIPolicyLogsURL[] = "chrome://policy/logs";
+ inline constexpr char kChromeUIPolicyTestURL[] = "chrome://policy/test";
+ inline constexpr char kChromeUIPolicyURL[] = "chrome://policy/";
++// phlink: chrome://portability hosts the profile export/import surface.
++inline constexpr char kChromeUIPortabilityHost[] = "portability";
++inline constexpr char kChromeUIPortabilityURL[] = "chrome://portability/";
+ inline constexpr char kChromeUIPredictorsHost[] = "predictors";
+ inline constexpr char kChromeUIPrefsInternalsHost[] = "prefs-internals";
+ inline constexpr char kChromeUIPrintURL[] = "chrome://print/";
+diff --git a/third_party/lit/v3_0/BUILD.gn b/third_party/lit/v3_0/BUILD.gn
+index 3d22db142f733..517d857b47dfa 100644
+--- a/third_party/lit/v3_0/BUILD.gn
++++ b/third_party/lit/v3_0/BUILD.gn
+@@ -79,6 +79,7 @@ ts_library("build_ts") {
+     "//chrome/browser/resources/on_device_internals:build_ts",
+     "//chrome/browser/resources/on_device_translation_internals:build_ts",
+     "//chrome/browser/resources/pdf:build_ts",
++    "//chrome/browser/resources/portability:build_ts",
+     "//chrome/browser/resources/print_preview:build_ts",
+     "//chrome/browser/resources/privacy_sandbox/internals/private_state_tokens:build_ts",
+     "//chrome/browser/resources/privacy_sandbox/internals/related_website_sets:build_ts",
+diff --git a/tools/gritsettings/resource_ids.spec b/tools/gritsettings/resource_ids.spec
+index 2aa0d9db98db2..2ac7da760ba5a 100644
+--- a/tools/gritsettings/resource_ids.spec
++++ b/tools/gritsettings/resource_ids.spec
+@@ -614,6 +614,10 @@
+     "META": {"sizes": {"includes": [200]}},
+     "includes": [4540],
+   },
++  "<(SHARED_INTERMEDIATE_DIR)/chrome/browser/resources/portability/resources.grd": {
++    "META": {"sizes": {"includes": [10]}},
++    "includes": [4555],
++  },
+   "<(SHARED_INTERMEDIATE_DIR)/chrome/browser/resources/predictors/resources.grd": {
+     "META": {"sizes": {"includes": [5],}},
+     "includes": [4560],
+-- 
+2.50.1 (Apple Git-155)
+
