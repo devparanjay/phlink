@@ -1,0 +1,333 @@
+From 4b77e0218f719267ab021338738fb84a969a3963 Mon Sep 17 00:00:00 2001
+From: phlink <phlink@local>
+Date: Wed, 29 Apr 2026 23:29:10 +0530
+Subject: [PATCH] phlink: phase 10.01a: update protocol spec (TUF v1.0.32
+ subset)
+
+Authors docs/dev/update-protocol.md, the on-the-wire contract between
+phlink and the update CDN. Locks:
+
+- TUF v1.0.32 subset (no delegated targets, no hash agility, no TAP-4).
+- Ed25519-only, SHA-256-only, boringssl-backed.
+- Four standard roles (root/targets/snapshot/timestamp), thresholds
+  m=2/n=3 for root, m=1 for the rest.
+- Static-file CDN at https://updates.phlink.dev/, single 'stable'
+  channel for v1.0 alpha.
+- Canonical-JSON re-emission on the client (don't trust server bytes).
+- Verification staircase: timestamp -> snapshot (length+hash gated)
+  -> targets (version gated).
+- Threat model coverage: MITM, rollback, freeze, mix-and-match,
+  online-key compromise, CDN compromise, endless-data, slowloris.
+- Quarterly key rotation cadence; root only on compromise or expiry.
+- Privacy: no install id, no telemetry, no cookies, no query params,
+  User-Agent only.
+- Failure logging: local-only, 1 MB rotated update.log per platform.
+
+Foundation deliverable for Phase 10 plan 10-01. C++ TufClient skeleton
+(in-tree, boringssl + base::JSONReader + SimpleURLLoader, no Rust
+crate vendoring -- see Phase 10 CONTEXT D-01 pivot rationale) lands
+in 10-01b.
+---
+ docs/dev/update-protocol.md | 290 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 290 insertions(+)
+ create mode 100644 docs/dev/update-protocol.md
+
+diff --git a/docs/dev/update-protocol.md b/docs/dev/update-protocol.md
+new file mode 100644
+index 0000000000000..4fbb1fc3c880c
+--- /dev/null
++++ b/docs/dev/update-protocol.md
+@@ -0,0 +1,290 @@
++# phlink update protocol
++
++**Status**: locked for Phase 10 (v1.0 alpha).
++**Spec target**: TUF v1.0.32 subset (delegated targets, hash-agility, and
++multi-repo TAP 4 are out of scope for v1.0).
++**Crypto policy**: Ed25519 only. SHA-256 only. boringssl-backed
++(`crypto::SignatureVerifier`).
++
++This document is the on-the-wire contract between the phlink browser and
++the phlink update CDN. Anything **not** in this document is **not** part
++of the contract — clients MUST reject metadata that contains unknown
++required fields and MUST ignore unknown optional fields.
++
++---
++
++## 1. Repository layout
++
++The update CDN is a static-file HTTPS origin. There is no dynamic
++backend. For v1.0 alpha there is exactly one channel: `stable`.
++
++```
++https://updates.phlink.dev/
++  stable/
++    metadata/
++      1.root.json          # version-prefixed; latest is also at root.json
++      root.json            # always == latest
++      targets.json         # signed by `targets` role
++      snapshot.json        # signed by `snapshot` role
++      timestamp.json       # signed by `timestamp` role
++    targets/
++      phlink-{semver}-mac-arm64.zip
++      phlink-{semver}-mac-x64.zip
++      phlink-{semver}-linux-x64.AppImage
++      phlink-{semver}-linux-x64.deb
++      phlink-{semver}-linux-x64.rpm
++      phlink-{semver}-win-x64.exe
++      phlink-{semver}-win-x64.msi
++```
++
++Clients fetch in this fixed order on every check:
++
++1. `timestamp.json` (small, expires fastest).
++2. If `timestamp.meta["snapshot.json"].version` ≠ the cached snapshot
++   version → fetch `snapshot.json`.
++3. If `snapshot.meta["targets.json"].version` ≠ the cached targets
++   version → fetch `targets.json`.
++4. Look up the target whose name matches the running platform and arch.
++
++This staircase means a no-op check is a single GET of `timestamp.json`.
++
++## 2. Roles
++
++| Role        | Threshold | Expiration | Held by   | Signs                              |
++|-------------|-----------|------------|-----------|------------------------------------|
++| `root`      | 2 of 3    | 365 d      | offline   | top-level role keys (incl. itself) |
++| `targets`   | 1 of 1    | 90 d       | online    | `targets.json`                     |
++| `snapshot`  | 1 of 1    | 30 d       | online    | `snapshot.json`                    |
++| `timestamp` | 1 of 1    | 7 d        | online    | `timestamp.json`                   |
++
++Root keys live on hardware tokens (YubiKey FIPS or equivalent). Targets,
++snapshot, and timestamp keys live in CI secrets and are rotated every 6
++months.
++
++Clients pin the **public** half of the initial root keyset at build time
++via `chrome/browser/phlink/updater/keys/dev_root.json` (selected by build
++flag `phlink_updater_dev_root` for dev builds) or
++`prod_root.json` (release builds). Subsequent root rotations are picked
++up by walking version-numbered `N.root.json` files signed by the previous
++root quorum.
++
++## 3. Canonical JSON
++
++All signed metadata uses TUF's canonical JSON encoding before signature:
++
++- UTF-8.
++- No leading/trailing whitespace.
++- Object keys sorted lexicographically.
++- No insignificant whitespace inside the value.
++- Numbers as the smallest decimal representation, no trailing zeros.
++
++phlink's implementation re-emits parsed values via a small canonicalizer
++in `metadata_client.cc` rather than trusting the server's byte stream;
++this protects against subtle encoder differences between languages.
++
++## 4. Metadata schemas
++
++### 4.1 root.json
++
++```json
++{
++  "signed": {
++    "_type": "root",
++    "spec_version": "1.0.32",
++    "version": 1,
++    "expires": "2027-04-30T00:00:00Z",
++    "consistent_snapshot": false,
++    "keys": {
++      "<key_id>": {
++        "keytype": "ed25519",
++        "scheme": "ed25519",
++        "keyval": { "public": "<hex>" }
++      }
++    },
++    "roles": {
++      "root":      { "keyids": ["..."], "threshold": 2 },
++      "targets":   { "keyids": ["..."], "threshold": 1 },
++      "snapshot":  { "keyids": ["..."], "threshold": 1 },
++      "timestamp": { "keyids": ["..."], "threshold": 1 }
++    }
++  },
++  "signatures": [
++    { "keyid": "<key_id>", "sig": "<hex>" }
++  ]
++}
++```
++
++`<key_id>` is the lowercase hex of `SHA-256(canonical_json(public_key))`.
++
++### 4.2 targets.json
++
++```json
++{
++  "signed": {
++    "_type": "targets",
++    "spec_version": "1.0.32",
++    "version": 4,
++    "expires": "2026-07-30T00:00:00Z",
++    "targets": {
++      "phlink-1.0.0-mac-arm64.zip": {
++        "length": 184283921,
++        "hashes": { "sha256": "<hex>" },
++        "custom": { "channel": "stable", "platform": "mac", "arch": "arm64" }
++      }
++    }
++  },
++  "signatures": [...]
++}
++```
++
++`custom` is opt-in; clients MUST tolerate its absence.
++
++### 4.3 snapshot.json
++
++```json
++{
++  "signed": {
++    "_type": "snapshot",
++    "spec_version": "1.0.32",
++    "version": 12,
++    "expires": "2026-05-30T00:00:00Z",
++    "meta": {
++      "targets.json": { "version": 4 }
++    }
++  },
++  "signatures": [...]
++}
++```
++
++Per TUF spec ≥1.0 we only carry `version` (not `length`/`hashes`) for
++non-target metadata. `consistent_snapshot=false` so version-prefixed
++filenames are not used for `targets.json` / `snapshot.json`.
++
++### 4.4 timestamp.json
++
++```json
++{
++  "signed": {
++    "_type": "timestamp",
++    "spec_version": "1.0.32",
++    "version": 312,
++    "expires": "2026-05-07T00:00:00Z",
++    "meta": {
++      "snapshot.json": {
++        "version": 12,
++        "length": 1283,
++        "hashes": { "sha256": "<hex>" }
++      }
++    }
++  },
++  "signatures": [...]
++}
++```
++
++`timestamp.json` carries `length` + `hashes` for `snapshot.json` so a
++client can reject a malicious `snapshot.json` before parsing it.
++
++## 5. Verification rules (client-side)
++
++For every check, the client walks roles in this order:
++
++1. **Root chain**: start from the pinned root version; walk forward
++   through `N+1.root.json`, `N+2.root.json`, … each signed by the
++   previous root quorum (m of n). Stop when the next file 404s. The
++   final root in the chain MUST NOT be expired.
++2. **Timestamp**: signed by ≥ threshold of the current root's `timestamp`
++   key set; not expired; `version` MUST be ≥ cached timestamp version
++   (rollback rejection).
++3. **Snapshot**: byte length and SHA-256 MUST match what `timestamp.json`
++   declared; signed by the current snapshot keyset; not expired;
++   `version` ≥ cached snapshot version.
++4. **Targets**: `version` MUST match what `snapshot.json` declared;
++   signed by the current targets keyset; not expired.
++
++Any failure is fatal for the check. Failures log a structured entry to
++`update.log` and increment an in-memory failure counter; the counter is
++not persisted and never leaves the device.
++
++## 6. Threat model
++
++| Attack                           | Mitigation                                            |
++|----------------------------------|-------------------------------------------------------|
++| MITM substitutes `timestamp.json` | Signature check against pinned root's timestamp key  |
++| Rollback to old vulnerable build  | `version` monotonicity on every role                 |
++| Freeze (serve stale metadata)     | `expires` field on every role                        |
++| Mix-and-match across snapshots    | `snapshot.json` pins exact `targets.json` version    |
++| Compromise of online keys         | Root rotation; expiration limits damage window       |
++| Compromise of CDN                 | All trust derives from offline root; CDN can't lie  |
++| Endless data attack on payload    | `length` from `targets.json` capped before download  |
++| Slow loris on download            | Per-byte read deadline in `network::SimpleURLLoader` |
++
++Out of scope: physical access to the user's machine, kernel compromise,
++malicious extensions running in the browser process.
++
++## 7. Key rotation
++
++Quarterly cadence target:
++
++- **Timestamp** key: rotated every 90 days (manual; pre-publish a
++  `timestamp.json` re-signed under the new key alongside one under the
++  old key for a 7-day overlap).
++- **Snapshot** key: rotated every 180 days.
++- **Targets** key: rotated every 365 days.
++- **Root** key: rotated only on compromise or 365-day expiration. Every
++  rotation increments the root version and is signed by both the
++  previous quorum and the new quorum.
++
++The full ceremony is documented in
++`docs/dev/release-keys.md` (deliverable of plan 10-08).
++
++## 8. Privacy
++
++The update check is a single HTTPS GET. The client sends:
++
++- `User-Agent: phlink/{version} ({os}; {arch})`.
++- No cookies. No `Authorization`. No other custom headers. No query
++  parameters.
++- Source IP is observable to the CDN (unavoidable). phlink does not
++  fingerprint or log this on the server side beyond standard CDN access
++  logs (rotated, not joined to any other identity).
++
++There is **no** install ID, machine ID, profile ID, or telemetry beacon.
++There is **no** opt-in path to enable any of the above in v1.0. This is
++covered by PRD §10.1 hard rule and Phase 10 CONTEXT D-09.
++
++## 9. Failure surfacing
++
++Update check / download failures are recorded in:
++
++- `~/Library/Application Support/phlink/update.log` (macOS),
++- `~/.config/phlink/update.log` (Linux),
++- `%LOCALAPPDATA%\phlink\update.log` (Windows),
++
++rotated at 1 MB. The log is plain UTF-8 with one structured record per
++line:
++
++```
++2026-05-04T12:34:56Z level=warn role=timestamp code=expired
++  cached_version=312 server_version=312 expires=2026-04-30T00:00:00Z
++```
++
++The `chrome://settings/help` UI surfaces only the most recent failure
++(human-readable). No remote crash beacon.
++
++## 10. Versioning of this protocol
++
++This document is versioned alongside the phlink binary. The on-the-wire
++TUF protocol does not encode a phlink-protocol-version because the
++underlying TUF `spec_version` field already covers it. Any
++phlink-specific extension (e.g. a future channel switcher) MUST land
++behind a build flag and a dev-channel rollout before being made required.
++
++---
++
++## References
++
++- TUF specification v1.0.32 — https://theupdateframework.io/specification/v1.0.32/
++- The Update Framework Augmentation Proposals (TAPs) — informational
++  only; phlink v1.0 alpha implements none of TAP-3 / TAP-4 / TAP-8.
++- phlink Phase 10 CONTEXT (`.planning/phases/10-update-mechanism/10-CONTEXT.md`).
++- phlink PRD §10.1 (locked decisions).
+-- 
+2.50.1 (Apple Git-155)
+
