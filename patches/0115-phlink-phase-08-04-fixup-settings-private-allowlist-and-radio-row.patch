@@ -1,0 +1,125 @@
+From 264cbbe5e1ea5ed75a3cce7cf3b3c88549401706 Mon Sep 17 00:00:00 2001
+From: phlink <phlink@local>
+Date: Wed, 29 Apr 2026 19:36:07 +0530
+Subject: [PATCH] =?UTF-8?q?phlink:=20phase=2008-04=20fixup=20=E2=80=94=20w?=
+ =?UTF-8?q?ire=20appearance=5Fmode=20through=20settingsPrivate?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+UAT exposed two bugs in the Phase 8-04 settings UI:
+
+1. Selecting the phlink theme radio did nothing.
+
+   chrome://settings reads/writes prefs through the settingsPrivate
+   extension API, which is gated by a hard allowlist in
+   chrome/browser/extensions/api/settings_private/prefs_util.cc::
+   GetAllowlistedKeys(). phlink.appearance_mode wasn't in it, so
+   writes from the WebUI silently no-op'd. Add the entry under the
+   "Appearance settings" section as PrefType::kNumber, plus the
+   needed include + BUILD.gn dep on
+   //chrome/browser/phlink/appearance:phlink_appearance.
+
+2. The radio group rendered without the standard cr-row container.
+
+   appearance_page.html had <settings-radio-group> as a direct child
+   of <div route-path="default">, so it inherited none of the
+   cr-row / continuation padding that every other settings radio
+   group uses (memory_page.html, site_settings/*). Wrap it in
+   <div class="cr-row continuation"> per the canonical pattern so
+   it visually matches the surrounding rows.
+
+This is a fixup commit on top of 0113. No new prefs, no new strings,
+no behavior change beyond making the existing radio actually work.
+
+Tests: 15/15 *Phlink* unit_tests still pass.
+---
+ chrome/browser/extensions/BUILD.gn            |  2 +-
+ .../api/settings_private/prefs_util.cc        |  6 ++++
+ .../appearance_page/appearance_page.html      | 32 ++++++++++---------
+ 3 files changed, 24 insertions(+), 16 deletions(-)
+
+diff --git a/chrome/browser/extensions/BUILD.gn b/chrome/browser/extensions/BUILD.gn
+index 87bd3cb0ae150..5bf29277adabe 100644
+--- a/chrome/browser/extensions/BUILD.gn
++++ b/chrome/browser/extensions/BUILD.gn
+@@ -516,7 +516,7 @@ source_set("extensions") {
+     "//chrome/browser/password_manager",
+     "//chrome/browser/password_manager:impl",
+     "//chrome/browser/password_manager/factories",
+-    "//chrome/browser/prefetch",
++    "//chrome/browser/phlink/appearance:phlink_appearance",
+     "//chrome/browser/prefs",
+     "//chrome/browser/prefs:util",
+     "//chrome/browser/preloading:prefs",
+diff --git a/chrome/browser/extensions/api/settings_private/prefs_util.cc b/chrome/browser/extensions/api/settings_private/prefs_util.cc
+index 901bf8103f3b8..8d8cef660daa2 100644
+--- a/chrome/browser/extensions/api/settings_private/prefs_util.cc
++++ b/chrome/browser/extensions/api/settings_private/prefs_util.cc
+@@ -25,6 +25,7 @@
+ #include "chrome/browser/metrics/profile_pref_names.h"
+ #include "chrome/browser/nearby_sharing/common/nearby_share_prefs.h"
+ #include "chrome/browser/password_manager/generated_password_leak_detection_pref.h"
++#include "chrome/browser/phlink/appearance/phlink_appearance_prefs.h"
+ #include "chrome/browser/prefs/session_startup_pref.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/safe_browsing/generated_safe_browsing_pref.h"
+@@ -274,6 +275,11 @@ const PrefsUtil::TypedPrefMap& PrefsUtil::GetAllowlistedKeys() {
+       settings_api::PrefType::kBoolean;
+ 
+   // Appearance settings.
++  // phlink: appearance picker pref (Phase 8 / D-04, D-05). settingsPrivate
++  // is allowlist-gated, so without this entry the chrome://settings UI's
++  // bound radio group reads the value but writes silently no-op.
++  (*s_allowlist)[phlink::appearance::kAppearanceMode] =
++      settings_api::PrefType::kNumber;
+   (*s_allowlist)[::prefs::kCurrentThemeID] = settings_api::PrefType::kString;
+   (*s_allowlist)[::prefs::kPinnedActions] = settings_api::PrefType::kList;
+   (*s_allowlist)[themes::prefs::kPolicyThemeColor] =
+diff --git a/chrome/browser/resources/settings/appearance_page/appearance_page.html b/chrome/browser/resources/settings/appearance_page/appearance_page.html
+index 131ca535497d6..15f9c6febe20e 100644
+--- a/chrome/browser/resources/settings/appearance_page/appearance_page.html
++++ b/chrome/browser/resources/settings/appearance_page/appearance_page.html
+@@ -46,22 +46,24 @@
+             $i18n{phlinkThemeRowTitle}
+           </div>
+         </div>
+-        <settings-radio-group id="phlinkThemeRadioGroup"
+-            pref="{{prefs.phlink.appearance_mode}}"
+-            aria-labelledby="phlinkThemeRowLabel">
+-          <controlled-radio-button name="0"
++        <div class="cr-row continuation">
++          <settings-radio-group id="phlinkThemeRadioGroup"
+               pref="{{prefs.phlink.appearance_mode}}"
+-              label="$i18n{phlinkThemeLight}">
+-          </controlled-radio-button>
+-          <controlled-radio-button name="1"
+-              pref="{{prefs.phlink.appearance_mode}}"
+-              label="$i18n{phlinkThemeDark}">
+-          </controlled-radio-button>
+-          <controlled-radio-button name="2"
+-              pref="{{prefs.phlink.appearance_mode}}"
+-              label="$i18n{phlinkThemeFollowSystem}">
+-          </controlled-radio-button>
+-        </settings-radio-group>
++              aria-labelledby="phlinkThemeRowLabel">
++            <controlled-radio-button name="0"
++                pref="{{prefs.phlink.appearance_mode}}"
++                label="$i18n{phlinkThemeLight}">
++            </controlled-radio-button>
++            <controlled-radio-button name="1"
++                pref="{{prefs.phlink.appearance_mode}}"
++                label="$i18n{phlinkThemeDark}">
++            </controlled-radio-button>
++            <controlled-radio-button name="2"
++                pref="{{prefs.phlink.appearance_mode}}"
++                label="$i18n{phlinkThemeFollowSystem}">
++            </controlled-radio-button>
++          </settings-radio-group>
++        </div>
+         <div class="settings-row" id="themeRow"
+             hidden="[[!pageVisibility.setTheme]]">
+           <cr-link-row id="openTheme" class="first"
+-- 
+2.50.1 (Apple Git-155)
+
