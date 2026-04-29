@@ -1,0 +1,398 @@
+From cf64e1af0dce8e3c4d952cf4124253565399ba37 Mon Sep 17 00:00:00 2001
+From: phlink <phlink@local>
+Date: Thu, 30 Apr 2026 00:06:43 +0530
+Subject: [PATCH] phlink: phase 10.02b: UpdaterService skeleton +
+ WallClockTimer
+
+UpdaterService owns: scheduling policy (UpdateCheckScheduler), a
+base::WallClockTimer, and pref read/write for kAutoCheckEnabled /
+kLastCheckTime / kNextCheckTime. The actual TUF metadata + payload
+fetch lives behind a CheckCallback injected at construction; plan
+10-02c will wire that callback to a network::SimpleURLLoader-backed
+fetcher. This slice keeps the timer/policy/pref logic decoupled
+from the network stack and independently unit-testable.
+
+No KeyedService factory + system-profile registration in this
+slice -- that lands in 10-02c alongside the network fetcher and
+staged.json persistence. RegisterPrefs() exposes the pref schema
+so the eventual factory and tests can share one source of truth.
+
+Files (under chrome/browser/phlink/updater/):
+  * updater_service.{h,cc} -- Start/Stop/CheckNow, Reschedule via
+    base::WallClockTimer (Time-based, survives suspend), pref
+    mirrors via injected PrefService*. RegisterPrefs registers
+    auto-check (default true) + last/next-check (int64 us since
+    Windows epoch).
+  * updater_service_unittest.cc -- 4 tests using TaskEnvironment
+    with MOCK_TIME and TestingPrefServiceSimple:
+      - StartSchedulesInitialDelayWhenEnabled
+      - StartIsNoopWhenAutoCheckDisabled
+      - TimerFiresCallbackAndReschedulesAroundBaseInterval
+        (FastForwardBy across kInitialDelay; asserts callback fired
+         and rearm window is in [base-jitter, base+jitter])
+      - CheckNowFiresImmediatelyAndReschedules
+  * BUILD.gn -- new source_set(service); unit_tests now depends on
+    :service, //base/test:test_support, //components/prefs, and
+    //components/prefs:test_support.
+
+Build: phlink_updater_unittests OK (11/11 pass; 4 metadata + 3
+scheduler + 4 service), chrome OK (codesigned).
+
+Refs phase 10 plan 10-02b.
+---
+ chrome/browser/phlink/updater/BUILD.gn        | 24 +++++
+ .../browser/phlink/updater/updater_service.cc | 96 +++++++++++++++++++
+ .../browser/phlink/updater/updater_service.h  | 88 +++++++++++++++++
+ .../updater/updater_service_unittest.cc       | 94 ++++++++++++++++++
+ 4 files changed, 302 insertions(+)
+ create mode 100644 chrome/browser/phlink/updater/updater_service.cc
+ create mode 100644 chrome/browser/phlink/updater/updater_service.h
+ create mode 100644 chrome/browser/phlink/updater/updater_service_unittest.cc
+
+diff --git a/chrome/browser/phlink/updater/BUILD.gn b/chrome/browser/phlink/updater/BUILD.gn
+index 0bc06770180b0..a1741a93a8bf0 100644
+--- a/chrome/browser/phlink/updater/BUILD.gn
++++ b/chrome/browser/phlink/updater/BUILD.gn
+@@ -43,6 +43,25 @@ source_set("scheduler") {
+   deps = [ "//base" ]
+ }
+ 
++# UpdaterService: owns the cadence policy (`scheduler`), a
++# `base::WallClockTimer`, and reads/writes update prefs via an
++# injected `PrefService*`. The actual TUF metadata + payload fetch
++# is hidden behind a `CheckCallback` injected at construction; plan
++# 10-02c will wire that callback to a `network::SimpleURLLoader`
++# fetcher. Tests inject a fake. No `KeyedServiceFactory` yet -- this
++# slice is the service logic only.
++source_set("service") {
++  sources = [
++    "updater_service.cc",
++    "updater_service.h",
++  ]
++  deps = [
++    ":scheduler",
++    "//base",
++    "//components/prefs",
++  ]
++}
++
+ # Dev-only trust root. `phlink_updater_dev_root` (in phlink_updater.gni)
+ # selects this. Production builds will replace it with `prod_root.json` in
+ # Phase 10 plan 10-08.
+@@ -58,12 +77,17 @@ source_set("unit_tests") {
+   sources = [
+     "metadata_client_unittest.cc",
+     "update_check_scheduler_unittest.cc",
++    "updater_service_unittest.cc",
+   ]
+   deps = [
+     ":canonical_json",
+     ":metadata",
+     ":scheduler",
++    ":service",
+     "//base",
++    "//base/test:test_support",
++    "//components/prefs",
++    "//components/prefs:test_support",
+     "//crypto",
+     "//testing/gtest",
+     "//third_party/boringssl",
+diff --git a/chrome/browser/phlink/updater/updater_service.cc b/chrome/browser/phlink/updater/updater_service.cc
+new file mode 100644
+index 0000000000000..a8e47e5be0a61
+--- /dev/null
++++ b/chrome/browser/phlink/updater/updater_service.cc
+@@ -0,0 +1,96 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/phlink/updater/updater_service.h"
++
++#include <utility>
++
++#include "base/functional/bind.h"
++#include "base/location.h"
++#include "base/time/time.h"
++#include "chrome/browser/phlink/updater/pref_names.h"
++#include "components/prefs/pref_registry_simple.h"
++#include "components/prefs/pref_service.h"
++
++namespace phlink::updater {
++
++// static
++void UpdaterService::RegisterPrefs(PrefRegistrySimple* registry) {
++  registry->RegisterBooleanPref(prefs::kAutoCheckEnabled, true);
++  registry->RegisterInt64Pref(prefs::kLastCheckTime, 0);
++  registry->RegisterInt64Pref(prefs::kNextCheckTime, 0);
++}
++
++UpdaterService::UpdaterService(PrefService* prefs,
++                               CheckCallback check_callback)
++    : prefs_(prefs),
++      check_callback_(std::move(check_callback)),
++      scheduler_(base::BindRepeating(&UpdaterService::IsAutoCheckEnabled,
++                                     base::Unretained(this))) {}
++
++UpdaterService::~UpdaterService() = default;
++
++void UpdaterService::Start() {
++  if (started_) {
++    return;
++  }
++  started_ = true;
++  // The first check after process start uses `kInitialDelay`; subsequent
++  // checks are jittered around `kBaseInterval`. We do not persist
++  // first-check state across restarts -- a freshly-started browser always
++  // gets a 5-minute warm-up before phoning home.
++  first_check_pending_ = true;
++  Reschedule(/*is_first_check=*/true);
++}
++
++void UpdaterService::Stop() {
++  started_ = false;
++  timer_.Stop();
++}
++
++void UpdaterService::CheckNow() {
++  prefs_->SetInt64(prefs::kLastCheckTime,
++                   base::Time::Now().ToDeltaSinceWindowsEpoch().InMicroseconds());
++  if (check_callback_) {
++    check_callback_.Run();
++  }
++  first_check_pending_ = false;
++  if (started_) {
++    Reschedule(/*is_first_check=*/false);
++  }
++}
++
++bool UpdaterService::IsRunningForTesting() const {
++  return timer_.IsRunning();
++}
++
++base::Time UpdaterService::NextCheckTimeForTesting() const {
++  return timer_.desired_run_time();
++}
++
++bool UpdaterService::IsAutoCheckEnabled() const {
++  return prefs_->GetBoolean(prefs::kAutoCheckEnabled);
++}
++
++void UpdaterService::Reschedule(bool is_first_check) {
++  std::optional<base::TimeDelta> delay =
++      scheduler_.ComputeNextDelay(is_first_check);
++  if (!delay.has_value()) {
++    timer_.Stop();
++    prefs_->SetInt64(prefs::kNextCheckTime, 0);
++    return;
++  }
++  const base::Time target = base::Time::Now() + *delay;
++  prefs_->SetInt64(prefs::kNextCheckTime,
++                   target.ToDeltaSinceWindowsEpoch().InMicroseconds());
++  timer_.Start(FROM_HERE, target,
++               base::BindOnce(&UpdaterService::OnTimerFired,
++                              base::Unretained(this)));
++}
++
++void UpdaterService::OnTimerFired() {
++  CheckNow();
++}
++
++}  // namespace phlink::updater
+diff --git a/chrome/browser/phlink/updater/updater_service.h b/chrome/browser/phlink/updater/updater_service.h
+new file mode 100644
+index 0000000000000..4afd74b3aa7d2
+--- /dev/null
++++ b/chrome/browser/phlink/updater/updater_service.h
+@@ -0,0 +1,88 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_PHLINK_UPDATER_UPDATER_SERVICE_H_
++#define CHROME_BROWSER_PHLINK_UPDATER_UPDATER_SERVICE_H_
++
++#include <memory>
++
++#include "base/functional/callback.h"
++#include "base/memory/raw_ptr.h"
++#include "base/time/time.h"
++#include "base/timer/wall_clock_timer.h"
++#include "chrome/browser/phlink/updater/update_check_scheduler.h"
++
++class PrefRegistrySimple;
++class PrefService;
++
++namespace phlink::updater {
++
++// Drives periodic update checks. This class owns the scheduling policy
++// (`UpdateCheckScheduler`), a `base::WallClockTimer` (so a suspended
++// laptop doesn't owe checks), and reads/writes the auto-check pref +
++// last/next-check timestamps via an injected `PrefService*`.
++//
++// The actual TUF metadata + payload fetch lives behind a `CheckCallback`
++// that this service does not own. Plan 10-02c will wire that callback to
++// a `network::SimpleURLLoader`-backed fetcher; tests inject a fake. This
++// keeps the timer/policy/pref logic decoupled from the network stack and
++// independently unit-testable.
++//
++// Construction does not start the timer. Callers should invoke `Start()`
++// after registering the prefs (`RegisterProfilePrefs`).
++class UpdaterService {
++ public:
++  // Invoked on the same sequence as `UpdaterService` whenever a check is
++  // due. The implementation is expected to perform the metadata + payload
++  // fetch and persist results out-of-band.
++  using CheckCallback = base::RepeatingClosure;
++
++  // Registers all updater-related prefs. Call once per `PrefService` (e.g.
++  // local state) before constructing the service.
++  static void RegisterPrefs(PrefRegistrySimple* registry);
++
++  // `prefs` and `check_callback` must outlive this object.
++  UpdaterService(PrefService* prefs, CheckCallback check_callback);
++  UpdaterService(const UpdaterService&) = delete;
++  UpdaterService& operator=(const UpdaterService&) = delete;
++  ~UpdaterService();
++
++  // Start the timer. No-op if already running. Safe to call repeatedly
++  // (e.g. after toggling the auto-check pref back to true).
++  void Start();
++
++  // Stop the timer. Idempotent.
++  void Stop();
++
++  // Trigger an immediate check, bypassing the timer. Records the result
++  // in `kLastCheckTime` and reschedules the next tick.
++  void CheckNow();
++
++  // Inspectors for tests.
++  bool IsRunningForTesting() const;
++  base::Time NextCheckTimeForTesting() const;
++
++ private:
++  // Reads `kAutoCheckEnabled` from the pref store.
++  bool IsAutoCheckEnabled() const;
++
++  // Schedule the next tick using `scheduler_.ComputeNextDelay`. Records
++  // the wall-clock target into `kNextCheckTime`. If the scheduler returns
++  // `nullopt` (auto-check disabled) the timer is stopped.
++  void Reschedule(bool is_first_check);
++
++  // Timer fired; runs the check callback then reschedules.
++  void OnTimerFired();
++
++  raw_ptr<PrefService> prefs_;
++  CheckCallback check_callback_;
++  UpdateCheckScheduler scheduler_;
++  base::WallClockTimer timer_;
++  bool started_ = false;
++  bool first_check_pending_ = true;
++};
++
++}  // namespace phlink::updater
++
++#endif  // CHROME_BROWSER_PHLINK_UPDATER_UPDATER_SERVICE_H_
+diff --git a/chrome/browser/phlink/updater/updater_service_unittest.cc b/chrome/browser/phlink/updater/updater_service_unittest.cc
+new file mode 100644
+index 0000000000000..a8d17ae8b316c
+--- /dev/null
++++ b/chrome/browser/phlink/updater/updater_service_unittest.cc
+@@ -0,0 +1,94 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/phlink/updater/updater_service.h"
++
++#include "base/functional/bind.h"
++#include "base/test/task_environment.h"
++#include "base/time/time.h"
++#include "chrome/browser/phlink/updater/pref_names.h"
++#include "chrome/browser/phlink/updater/update_check_scheduler.h"
++#include "components/prefs/testing_pref_service.h"
++#include "testing/gtest/include/gtest/gtest.h"
++
++namespace phlink::updater {
++namespace {
++
++class UpdaterServiceTest : public ::testing::Test {
++ protected:
++  UpdaterServiceTest() {
++    UpdaterService::RegisterPrefs(prefs_.registry());
++  }
++
++  base::test::TaskEnvironment task_env_{
++      base::test::TaskEnvironment::TimeSource::MOCK_TIME};
++  TestingPrefServiceSimple prefs_;
++};
++
++TEST_F(UpdaterServiceTest, StartSchedulesInitialDelayWhenEnabled) {
++  int call_count = 0;
++  UpdaterService svc(&prefs_,
++                     base::BindRepeating([](int* c) { ++*c; }, &call_count));
++  const base::Time before = base::Time::Now();
++  svc.Start();
++  EXPECT_TRUE(svc.IsRunningForTesting());
++  // Next-check time should land within the initial-delay window.
++  const base::TimeDelta gap = svc.NextCheckTimeForTesting() - before;
++  EXPECT_EQ(gap, UpdateCheckScheduler::kInitialDelay);
++  EXPECT_EQ(call_count, 0);
++  // Pref mirror: kNextCheckTime is populated, kLastCheckTime not yet.
++  EXPECT_GT(prefs_.GetInt64(prefs::kNextCheckTime), 0);
++  EXPECT_EQ(prefs_.GetInt64(prefs::kLastCheckTime), 0);
++}
++
++TEST_F(UpdaterServiceTest, StartIsNoopWhenAutoCheckDisabled) {
++  prefs_.SetBoolean(prefs::kAutoCheckEnabled, false);
++  int call_count = 0;
++  UpdaterService svc(&prefs_,
++                     base::BindRepeating([](int* c) { ++*c; }, &call_count));
++  svc.Start();
++  // Scheduler returned nullopt -> timer never armed.
++  EXPECT_FALSE(svc.IsRunningForTesting());
++  EXPECT_EQ(prefs_.GetInt64(prefs::kNextCheckTime), 0);
++  EXPECT_EQ(call_count, 0);
++}
++
++TEST_F(UpdaterServiceTest, TimerFiresCallbackAndReschedulesAroundBaseInterval) {
++  int call_count = 0;
++  UpdaterService svc(&prefs_,
++                     base::BindRepeating([](int* c) { ++*c; }, &call_count));
++  svc.Start();
++  // Cross the initial-delay boundary.
++  task_env_.FastForwardBy(UpdateCheckScheduler::kInitialDelay +
++                          base::Seconds(1));
++  EXPECT_EQ(call_count, 1);
++  // Pref mirror updated; timer rearmed for the jittered base interval.
++  EXPECT_GT(prefs_.GetInt64(prefs::kLastCheckTime), 0);
++  EXPECT_TRUE(svc.IsRunningForTesting());
++  const base::TimeDelta next_gap =
++      svc.NextCheckTimeForTesting() - base::Time::Now();
++  EXPECT_GE(next_gap, UpdateCheckScheduler::kBaseInterval -
++                          UpdateCheckScheduler::kJitter);
++  EXPECT_LE(next_gap, UpdateCheckScheduler::kBaseInterval +
++                          UpdateCheckScheduler::kJitter);
++}
++
++TEST_F(UpdaterServiceTest, CheckNowFiresImmediatelyAndReschedules) {
++  int call_count = 0;
++  UpdaterService svc(&prefs_,
++                     base::BindRepeating([](int* c) { ++*c; }, &call_count));
++  svc.Start();
++  svc.CheckNow();
++  EXPECT_EQ(call_count, 1);
++  EXPECT_TRUE(svc.IsRunningForTesting());
++  // After the manual check, subsequent reschedule uses the base-interval
++  // window, not the initial delay.
++  const base::TimeDelta next_gap =
++      svc.NextCheckTimeForTesting() - base::Time::Now();
++  EXPECT_GE(next_gap, UpdateCheckScheduler::kBaseInterval -
++                          UpdateCheckScheduler::kJitter);
++}
++
++}  // namespace
++}  // namespace phlink::updater
+-- 
+2.50.1 (Apple Git-155)
+
