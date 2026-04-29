@@ -1,0 +1,301 @@
+From afab0aa190b5c900724e57dfa9539c2421baa07a Mon Sep 17 00:00:00 2001
+From: phlink <phlink@local>
+Date: Thu, 30 Apr 2026 00:01:20 +0530
+Subject: [PATCH] phlink: phase 10.02a: UpdateCheckScheduler + pref names
+
+Pure-policy scheduling primitive for the update-check cadence. No
+timer, no I/O, no prefs read inline -- the caller injects a
+"is auto-check enabled?" callback and feeds wall-clock time. This
+isolates the cadence math (5 min initial; 24h +/- 6h jittered base)
+from the keyed-service / pref-store / timer plumbing that plan
+10-02b will own.
+
+  * pref_names.h -- prefs::kAutoCheckEnabled (bool, default true),
+    kLastCheckTime, kNextCheckTime (int64 microseconds since the
+    Windows epoch).
+  * update_check_scheduler.{h,cc} -- UpdateCheckScheduler with
+    kInitialDelay/kBaseInterval/kJitter constants and
+    ComputeNextDelay(is_first_check). Uniform jitter via
+    base::RandGenerator (uint64 -> recentered int64 to avoid the
+    base::RandInt int-only signature).
+  * update_check_scheduler_unittest.cc -- 3 tests:
+    ReturnsNulloptWhenAutoCheckDisabled, FirstCheckUsesInitialDelay,
+    SubsequentChecksAreJitteredWithinEnvelope (200 draws within
+    [base-jitter, base+jitter] with >100 distinct values to catch
+    a fully-deterministic regression).
+  * BUILD.gn -- new source_set(scheduler), wired into unit_tests.
+
+Build: phlink_updater_unittests OK (7/7 pass; 4 metadata + 3
+scheduler), chrome OK (codesigned).
+
+Refs phase 10 plan 10-02a.
+---
+ chrome/browser/phlink/updater/BUILD.gn        | 18 ++++-
+ chrome/browser/phlink/updater/pref_names.h    | 23 +++++++
+ .../phlink/updater/update_check_scheduler.cc  | 37 ++++++++++
+ .../phlink/updater/update_check_scheduler.h   | 63 +++++++++++++++++
+ .../update_check_scheduler_unittest.cc        | 69 +++++++++++++++++++
+ 5 files changed, 209 insertions(+), 1 deletion(-)
+ create mode 100644 chrome/browser/phlink/updater/pref_names.h
+ create mode 100644 chrome/browser/phlink/updater/update_check_scheduler.cc
+ create mode 100644 chrome/browser/phlink/updater/update_check_scheduler.h
+ create mode 100644 chrome/browser/phlink/updater/update_check_scheduler_unittest.cc
+
+diff --git a/chrome/browser/phlink/updater/BUILD.gn b/chrome/browser/phlink/updater/BUILD.gn
+index 6ced8c8f04fc6..0bc06770180b0 100644
+--- a/chrome/browser/phlink/updater/BUILD.gn
++++ b/chrome/browser/phlink/updater/BUILD.gn
+@@ -31,6 +31,18 @@ source_set("metadata") {
+   ]
+ }
+ 
++# Periodic update-check scheduler. No I/O, no timer -- pure cadence
++# math. Plan 10-02b will own a `UpdaterService` keyed-service that
++# wires this into a `base::WallClockTimer`.
++source_set("scheduler") {
++  sources = [
++    "pref_names.h",
++    "update_check_scheduler.cc",
++    "update_check_scheduler.h",
++  ]
++  deps = [ "//base" ]
++}
++
+ # Dev-only trust root. `phlink_updater_dev_root` (in phlink_updater.gni)
+ # selects this. Production builds will replace it with `prod_root.json` in
+ # Phase 10 plan 10-08.
+@@ -43,10 +55,14 @@ if (phlink_updater_dev_root) {
+ 
+ source_set("unit_tests") {
+   testonly = true
+-  sources = [ "metadata_client_unittest.cc" ]
++  sources = [
++    "metadata_client_unittest.cc",
++    "update_check_scheduler_unittest.cc",
++  ]
+   deps = [
+     ":canonical_json",
+     ":metadata",
++    ":scheduler",
+     "//base",
+     "//crypto",
+     "//testing/gtest",
+diff --git a/chrome/browser/phlink/updater/pref_names.h b/chrome/browser/phlink/updater/pref_names.h
+new file mode 100644
+index 0000000000000..9622a1e586949
+--- /dev/null
++++ b/chrome/browser/phlink/updater/pref_names.h
+@@ -0,0 +1,23 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_PHLINK_UPDATER_PREF_NAMES_H_
++#define CHROME_BROWSER_PHLINK_UPDATER_PREF_NAMES_H_
++
++namespace phlink::updater::prefs {
++
++// bool. If false, the browser performs no automatic update checks at all.
++// User-initiated "Check now" still works. Default: true.
++inline constexpr char kAutoCheckEnabled[] = "phlink.updates.auto_check_enabled";
++
++// int64 (microseconds since the Windows epoch). Wall-clock time of the
++// last completed check, regardless of outcome. 0 = never checked.
++inline constexpr char kLastCheckTime[] = "phlink.updates.last_check_time";
++
++// int64. Wall-clock time of the next scheduled check. 0 = unscheduled.
++inline constexpr char kNextCheckTime[] = "phlink.updates.next_check_time";
++
++}  // namespace phlink::updater::prefs
++
++#endif  // CHROME_BROWSER_PHLINK_UPDATER_PREF_NAMES_H_
+diff --git a/chrome/browser/phlink/updater/update_check_scheduler.cc b/chrome/browser/phlink/updater/update_check_scheduler.cc
+new file mode 100644
+index 0000000000000..f519933372695
+--- /dev/null
++++ b/chrome/browser/phlink/updater/update_check_scheduler.cc
+@@ -0,0 +1,37 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/phlink/updater/update_check_scheduler.h"
++
++#include <utility>
++
++#include "base/rand_util.h"
++
++namespace phlink::updater {
++
++UpdateCheckScheduler::UpdateCheckScheduler(
++    base::RepeatingCallback<bool()> is_auto_check_enabled)
++    : is_auto_check_enabled_(std::move(is_auto_check_enabled)) {}
++
++UpdateCheckScheduler::~UpdateCheckScheduler() = default;
++
++std::optional<base::TimeDelta> UpdateCheckScheduler::ComputeNextDelay(
++    bool is_first_check) const {
++  if (!is_auto_check_enabled_.Run()) {
++    return std::nullopt;
++  }
++  if (is_first_check) {
++    return kInitialDelay;
++  }
++  // Uniform jitter in [-kJitter, +kJitter]. base::RandGenerator returns
++  // a uint64 in [0, range), so we shift by kJitter to recenter on zero.
++  const uint64_t range =
++      static_cast<uint64_t>(2 * kJitter.InMicroseconds() + 1);
++  const int64_t jitter_us =
++      static_cast<int64_t>(base::RandGenerator(range)) -
++      kJitter.InMicroseconds();
++  return kBaseInterval + base::Microseconds(jitter_us);
++}
++
++}  // namespace phlink::updater
+diff --git a/chrome/browser/phlink/updater/update_check_scheduler.h b/chrome/browser/phlink/updater/update_check_scheduler.h
+new file mode 100644
+index 0000000000000..6208a252d2b63
+--- /dev/null
++++ b/chrome/browser/phlink/updater/update_check_scheduler.h
+@@ -0,0 +1,63 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_PHLINK_UPDATER_UPDATE_CHECK_SCHEDULER_H_
++#define CHROME_BROWSER_PHLINK_UPDATER_UPDATE_CHECK_SCHEDULER_H_
++
++#include <optional>
++
++#include "base/functional/callback.h"
++#include "base/time/time.h"
++
++namespace phlink::updater {
++
++// Pure scheduling logic for periodic update checks. No timer, no I/O, no
++// prefs -- the caller injects the auto-check gate as a callback and feeds
++// the current wall-clock time. This keeps the policy decisions
++// (initial delay, base cadence, jitter envelope, auto-check gate) in
++// one place that is trivially unit-testable without mock time.
++//
++// Cadence (locked by docs/dev/update-protocol.md, plan 10-02 D-decisions):
++//   * First check: 5 minutes after browser start (post-startup pressure).
++//   * Subsequent: every 24 hours +/- 6 hours uniform jitter, anchored to
++//     wall-clock time.
++//
++// The 24h-jitter window is chosen to spread fleet-wide check traffic and
++// to avoid synchronized retry storms on metadata-server failure.
++//
++// Plan 10-02b will own a `UpdaterService` that owns one of these and
++// drives a `base::WallClockTimer` off `ComputeNextDelay()`.
++class UpdateCheckScheduler {
++ public:
++  // Time from browser start to the very first check.
++  static constexpr base::TimeDelta kInitialDelay = base::Minutes(5);
++
++  // Mean interval between checks.
++  static constexpr base::TimeDelta kBaseInterval = base::Hours(24);
++
++  // Half-width of the uniform jitter envelope. Effective interval is
++  // [kBaseInterval - kJitter, kBaseInterval + kJitter].
++  static constexpr base::TimeDelta kJitter = base::Hours(6);
++
++  // `is_auto_check_enabled` is invoked synchronously each time the
++  // scheduler is asked for a delay. The callback typically reads the
++  // `prefs::kAutoCheckEnabled` pref off the local state.
++  explicit UpdateCheckScheduler(
++      base::RepeatingCallback<bool()> is_auto_check_enabled);
++  UpdateCheckScheduler(const UpdateCheckScheduler&) = delete;
++  UpdateCheckScheduler& operator=(const UpdateCheckScheduler&) = delete;
++  ~UpdateCheckScheduler();
++
++  // Returns the delay until the next check, or std::nullopt if auto-check
++  // is currently disabled. `is_first_check` selects between
++  // `kInitialDelay` and the jittered cadence.
++  std::optional<base::TimeDelta> ComputeNextDelay(bool is_first_check) const;
++
++ private:
++  base::RepeatingCallback<bool()> is_auto_check_enabled_;
++};
++
++}  // namespace phlink::updater
++
++#endif  // CHROME_BROWSER_PHLINK_UPDATER_UPDATE_CHECK_SCHEDULER_H_
+diff --git a/chrome/browser/phlink/updater/update_check_scheduler_unittest.cc b/chrome/browser/phlink/updater/update_check_scheduler_unittest.cc
+new file mode 100644
+index 0000000000000..8d3f0f92ee445
+--- /dev/null
++++ b/chrome/browser/phlink/updater/update_check_scheduler_unittest.cc
+@@ -0,0 +1,69 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/phlink/updater/update_check_scheduler.h"
++
++#include <set>
++
++#include "base/functional/bind.h"
++#include "testing/gtest/include/gtest/gtest.h"
++
++namespace phlink::updater {
++namespace {
++
++class UpdateCheckSchedulerTest : public ::testing::Test {
++ protected:
++  base::RepeatingCallback<bool()> Gate(bool* enabled) {
++    return base::BindRepeating([](bool* p) { return *p; }, enabled);
++  }
++};
++
++TEST_F(UpdateCheckSchedulerTest, ReturnsNulloptWhenAutoCheckDisabled) {
++  bool enabled = false;
++  UpdateCheckScheduler s(Gate(&enabled));
++
++  EXPECT_FALSE(s.ComputeNextDelay(/*is_first_check=*/true).has_value());
++  EXPECT_FALSE(s.ComputeNextDelay(/*is_first_check=*/false).has_value());
++
++  enabled = true;
++  EXPECT_TRUE(s.ComputeNextDelay(/*is_first_check=*/true).has_value());
++}
++
++TEST_F(UpdateCheckSchedulerTest, FirstCheckUsesInitialDelay) {
++  bool enabled = true;
++  UpdateCheckScheduler s(Gate(&enabled));
++
++  std::optional<base::TimeDelta> d = s.ComputeNextDelay(/*is_first_check=*/true);
++  ASSERT_TRUE(d.has_value());
++  EXPECT_EQ(*d, UpdateCheckScheduler::kInitialDelay);
++}
++
++TEST_F(UpdateCheckSchedulerTest, SubsequentChecksAreJitteredWithinEnvelope) {
++  bool enabled = true;
++  UpdateCheckScheduler s(Gate(&enabled));
++
++  const base::TimeDelta lo =
++      UpdateCheckScheduler::kBaseInterval - UpdateCheckScheduler::kJitter;
++  const base::TimeDelta hi =
++      UpdateCheckScheduler::kBaseInterval + UpdateCheckScheduler::kJitter;
++
++  // 200 draws should populate at least a handful of distinct values from
++  // the (effectively infinite) jitter range; a fully-deterministic
++  // scheduler would fail this.
++  std::set<int64_t> distinct;
++  for (int i = 0; i < 200; ++i) {
++    std::optional<base::TimeDelta> d =
++        s.ComputeNextDelay(/*is_first_check=*/false);
++    ASSERT_TRUE(d.has_value());
++    EXPECT_GE(*d, lo);
++    EXPECT_LE(*d, hi);
++    distinct.insert(d->InMicroseconds());
++  }
++  EXPECT_GT(distinct.size(), 100u)
++      << "Jitter does not appear to be random; got " << distinct.size()
++      << " distinct values out of 200 draws";
++}
++
++}  // namespace
++}  // namespace phlink::updater
+-- 
+2.50.1 (Apple Git-155)
+
