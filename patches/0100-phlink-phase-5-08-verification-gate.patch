@@ -1,0 +1,114 @@
+From e97b40858fc96c31de5d365e1488958ad82be402 Mon Sep 17 00:00:00 2001
+From: phlink <phlink@local>
+Date: Wed, 29 Apr 2026 14:08:55 +0530
+Subject: [PATCH] =?UTF-8?q?phlink:=20phase=205-08=20=E2=80=94=20verificati?=
+ =?UTF-8?q?on=20gate=20(10-URL=20block=20test=20+=20audit)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Adds the phase-5 acceptance regression canary and records the static
+audit results for the phlink fork.
+
+Tests
+-----
+* `PhlinkAdblockBundledRulesTest.BlocksTenSpotCheckHosts` —
+  spans EasyList (doubleclick), Google AdSense / AdManager
+  (pagead2.googlesyndication.com, securepubads.g.doubleclick.net,
+  googletagservices.com, adservice.google.com), EasyPrivacy /
+  analytics (google-analytics.com, googletagmanager.com,
+  stats.g.doubleclick.net), and Facebook tracking
+  (facebook.com/tr, connect.facebook.net/fbevents.js). All 10 must
+  block; if any one stops blocking the bundled-list snapshot has
+  regressed and 5-04 needs to be re-pinned.
+
+  14/14 unit tests pass.
+
+Audit (recorded in plan 5-08, not new code)
+-------------------------------------------
+* Netcap: `grep -rn 'googleapis\.com' chrome/browser/phlink/
+  chrome/renderer/phlink/ third_party/phlink_filter_lists/` ⇒ only
+  filter-list rules (which BLOCK phone-home traffic; expected).
+  Component-updater pin from 5-07 means the only remaining
+  Chromium-side phone-home is now `updates.phlink.invalid` (DNS
+  fail-closed).
+* Branding: `grep -rEn '"(Chrome|Chromium)"' chrome/browser/phlink/
+  chrome/renderer/phlink/` ⇒ no hits. phlink dirs are clean.
+* Google services: no `safebrowsing|sync_server|widevine`
+  references in phlink dirs. Site isolation untouched (PRD §10.1
+  D-04).
+
+Manual smoke (run separately on the linked Chrome.app)
+------------------------------------------------------
+* 5 ad-laden sites: cnn.com, theguardian.com, forbes.com,
+  weather.com, ndtv.com (visual confirmation that ads + cookie
+  banners are gone, no console JS errors from missing trackers).
+* `chrome://components` enumerates components (no crashes from the
+  pinned updater URL).
+* Cosmetic filtering renders correctly on a hand-crafted local
+  test page (5-05 acceptance).
+These remain user-driven gates; this commit covers the parts that
+can be regressed by code changes alone.
+
+Refs PRD §6 / §9 / §10.1 (D-05), plan 5-08.
+---
+ .../phlink/adblock/phlink_adblock_unittest.cc | 36 +++++++++++++++++++
+ 1 file changed, 36 insertions(+)
+
+diff --git a/chrome/browser/phlink/adblock/phlink_adblock_unittest.cc b/chrome/browser/phlink/adblock/phlink_adblock_unittest.cc
+index 2484c4ae79410..467c3163ac37c 100644
+--- a/chrome/browser/phlink/adblock/phlink_adblock_unittest.cc
++++ b/chrome/browser/phlink/adblock/phlink_adblock_unittest.cc
+@@ -5,6 +5,7 @@
+ #include "chrome/browser/phlink/adblock/phlink_adblock.h"
+ 
+ #include <memory>
++#include <iterator>
+ 
+ #include "chrome/browser/phlink/adblock/engine_provider.h"
+ #include "testing/gtest/include/gtest/gtest.h"
+@@ -113,6 +114,41 @@ TEST(PhlinkAdblockBundledRulesTest, BlocksKnownAdHost) {
+       << "bundled lists should not block first-party scripts";
+ }
+ 
++TEST(PhlinkAdblockBundledRulesTest, BlocksTenSpotCheckHosts) {
++  // PRD §6 / phase 5-08 verification gate: the bundled engine must block
++  // a curated 10-URL spot-check list spanning the ad/tracking/analytics
++  // categories covered by EasyList + EasyPrivacy + Brave's MPL lists.
++  // These are not exhaustive — they are a regression canary.
++  auto engine = Engine::CreateFromRules(PhlinkBundledFilterRules());
++  ASSERT_TRUE(engine);
++
++  struct Spot { const char* url; const char* type; };
++  const Spot spots[] = {
++      {"https://doubleclick.net/ad/banner.js", "script"},
++      {"https://pagead2.googlesyndication.com/pagead/show_ads.js", "script"},
++      {"https://securepubads.g.doubleclick.net/tag/js/gpt.js", "script"},
++      {"https://www.google-analytics.com/analytics.js", "script"},
++      {"https://www.googletagmanager.com/gtm.js?id=GTM-XXX", "script"},
++      {"https://www.googletagservices.com/tag/js/gpt.js", "script"},
++      {"https://stats.g.doubleclick.net/dc.js", "script"},
++      {"https://adservice.google.com/adsid/integrator.js", "script"},
++      {"https://www.facebook.com/tr?id=1234567890&ev=PageView", "image"},
++      {"https://connect.facebook.net/en_US/fbevents.js", "script"},
++  };
++  const char* tab = "https://news.example.test/";
++  size_t blocked_count = 0;
++  for (const auto& s : spots) {
++    auto r = engine->ShouldBlock(s.url, tab, s.type);
++    if (r.matched) {
++      ++blocked_count;
++    } else {
++      ADD_FAILURE() << "spot-check URL not blocked: " << s.url;
++    }
++  }
++  EXPECT_EQ(blocked_count, std::size(spots))
++      << "phase 5-08 acceptance: all 10 spot-check URLs must block";
++}
++
+ TEST(PhlinkAdblockCosmeticTest, HostScopedHideSelector) {
+   // uBO/EasyList syntax: `example.invalid##.ad-banner` hides
+   // `.ad-banner` only on example.invalid, not elsewhere.
+-- 
+2.50.1 (Apple Git-155)
+
