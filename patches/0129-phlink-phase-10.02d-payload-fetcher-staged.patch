@@ -1,0 +1,687 @@
+From 796afe53356dc31c0250c0eabb02ce25b20fbd73 Mon Sep 17 00:00:00 2001
+From: phlink <dev@phlink.local>
+Date: Thu, 30 Apr 2026 00:34:12 +0530
+Subject: [PATCH] phlink: phase 10.02d PayloadFetcher + StagedPayload
+
+PayloadFetcher: downloads an update payload zip via
+network::SimpleURLLoader::DownloadToFile and verifies size + SHA-256
+against targets.json on a MayBlock thread. On failure (network, length
+mismatch, hash mismatch, or I/O error) the staged file is deleted.
+
+StagedPayload: writes/reads Updates/staged.json
+({schema, version, payload_path, verified_at}) atomically via
+ImportantFileWriter; the platform-specific update helper (10-03/04/05)
+will pick this up at next launch.
+
+22/22 phlink_updater_unittests pass (4 new payload-fetcher + 4 new
+staged-payload). Refs phlink phase 10-02d.
+---
+ chrome/browser/phlink/updater/BUILD.gn        |  34 ++++
+ .../browser/phlink/updater/payload_fetcher.cc | 164 ++++++++++++++++++
+ .../browser/phlink/updater/payload_fetcher.h  |  99 +++++++++++
+ .../updater/payload_fetcher_unittest.cc       | 104 +++++++++++
+ .../browser/phlink/updater/staged_payload.cc  |  85 +++++++++
+ .../browser/phlink/updater/staged_payload.h   |  42 +++++
+ .../phlink/updater/staged_payload_unittest.cc |  60 +++++++
+ 7 files changed, 588 insertions(+)
+ create mode 100644 chrome/browser/phlink/updater/payload_fetcher.cc
+ create mode 100644 chrome/browser/phlink/updater/payload_fetcher.h
+ create mode 100644 chrome/browser/phlink/updater/payload_fetcher_unittest.cc
+ create mode 100644 chrome/browser/phlink/updater/staged_payload.cc
+ create mode 100644 chrome/browser/phlink/updater/staged_payload.h
+ create mode 100644 chrome/browser/phlink/updater/staged_payload_unittest.cc
+
+diff --git a/chrome/browser/phlink/updater/BUILD.gn b/chrome/browser/phlink/updater/BUILD.gn
+index a9551e1566685..ad6ce6f79899b 100644
+--- a/chrome/browser/phlink/updater/BUILD.gn
++++ b/chrome/browser/phlink/updater/BUILD.gn
+@@ -82,6 +82,36 @@ source_set("fetcher") {
+   ]
+ }
+ 
++# PayloadFetcher: downloads an update payload zip via
++# SimpleURLLoader::DownloadToFile and verifies its size + SHA-256
++# against the values from targets.json. On failure, the staged file
++# is deleted.
++source_set("payload_fetcher") {
++  sources = [
++    "payload_fetcher.cc",
++    "payload_fetcher.h",
++  ]
++  deps = [
++    "//base",
++    "//crypto",
++    "//net/traffic_annotation",
++    "//services/network/public/cpp",
++    "//services/network/public/mojom",
++    "//url",
++  ]
++}
++
++# StagedPayload: tiny on-disk record (`Updates/staged.json`) of the
++# most recent verified payload, picked up by the platform-specific
++# update helper at next launch.
++source_set("staged_payload") {
++  sources = [
++    "staged_payload.cc",
++    "staged_payload.h",
++  ]
++  deps = [ "//base" ]
++}
++
+ # Shared metadata-builder helpers used by metadata_client_unittest
+ # and metadata_fetcher_unittest. Builds Ed25519-signed root /
+ # timestamp / snapshot / targets envelopes inline so tests don't
+@@ -115,6 +145,8 @@ source_set("unit_tests") {
+   sources = [
+     "metadata_client_unittest.cc",
+     "metadata_fetcher_unittest.cc",
++    "payload_fetcher_unittest.cc",
++    "staged_payload_unittest.cc",
+     "update_check_scheduler_unittest.cc",
+     "updater_service_unittest.cc",
+   ]
+@@ -122,8 +154,10 @@ source_set("unit_tests") {
+     ":canonical_json",
+     ":fetcher",
+     ":metadata",
++    ":payload_fetcher",
+     ":scheduler",
+     ":service",
++    ":staged_payload",
+     ":test_helpers",
+     "//base",
+     "//base/test:test_support",
+diff --git a/chrome/browser/phlink/updater/payload_fetcher.cc b/chrome/browser/phlink/updater/payload_fetcher.cc
+new file mode 100644
+index 0000000000000..438d6ba8f3c9b
+--- /dev/null
++++ b/chrome/browser/phlink/updater/payload_fetcher.cc
+@@ -0,0 +1,164 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/phlink/updater/payload_fetcher.h"
++
++#include <utility>
++
++#include "base/check.h"
++#include "base/files/file.h"
++#include "base/files/file_util.h"
++#include "base/functional/bind.h"
++#include "base/task/sequenced_task_runner.h"
++#include "base/task/thread_pool.h"
++#include "crypto/hash.h"
++#include "net/base/load_flags.h"
++#include "net/traffic_annotation/network_traffic_annotation.h"
++#include "services/network/public/cpp/resource_request.h"
++#include "services/network/public/cpp/shared_url_loader_factory.h"
++#include "services/network/public/cpp/simple_url_loader.h"
++
++namespace phlink::updater {
++namespace {
++
++constexpr net::NetworkTrafficAnnotationTag kTrafficAnnotation =
++    net::DefineNetworkTrafficAnnotation("phlink_updater_payload", R"(
++        semantics {
++          sender: "phlink updater"
++          description:
++            "Downloads a phlink update payload (zip) referenced by the "
++            "previously-fetched and signature-verified targets.json. "
++            "phlink verifies the payload's SHA-256 locally before staging."
++          trigger:
++            "A new update version was advertised by signed TUF metadata."
++          data:
++            "None. Only the payload URL is sent. No user identifiers, "
++            "cookies, or auth headers are attached."
++          destination: WEBSITE
++          internal {
++            contacts { email: "updates@phlink.dev" }
++          }
++          user_data { type: NONE }
++          last_reviewed: "2026-04-30"
++        }
++        policy {
++          cookies_allowed: NO
++          setting:
++            "Disable phlink's auto-update by toggling the 'Automatic "
++            "updates' setting under Settings > About phlink."
++          chrome_policy {}
++        })");
++
++}  // namespace
++
++PayloadFetcher::PayloadFetcher(
++    scoped_refptr<network::SharedURLLoaderFactory> factory,
++    base::FilePath staging_dir)
++    : factory_(std::move(factory)),
++      staging_dir_(std::move(staging_dir)),
++      blocking_runner_(base::ThreadPool::CreateSequencedTaskRunner(
++          {base::MayBlock(), base::TaskPriority::BEST_EFFORT})) {
++  CHECK(!staging_dir_.empty());
++}
++
++PayloadFetcher::~PayloadFetcher() = default;
++
++void PayloadFetcher::set_blocking_task_runner_for_testing(
++    scoped_refptr<base::SequencedTaskRunner> runner) {
++  blocking_runner_ = std::move(runner);
++}
++
++void PayloadFetcher::set_max_payload_bytes_for_testing(int64_t max_bytes) {
++  max_payload_bytes_ = max_bytes;
++}
++
++void PayloadFetcher::Fetch(GURL url,
++                           uint64_t expected_length,
++                           std::array<uint8_t, 32> expected_sha256,
++                           ResultCallback callback) {
++  CHECK(url.is_valid());
++  CHECK(!callback_) << "PayloadFetcher is one-shot";
++  callback_ = std::move(callback);
++  expected_length_ = expected_length;
++  expected_sha256_ = expected_sha256;
++
++  base::FilePath payload_path = staging_dir_.Append(FILE_PATH_LITERAL("payload.zip"));
++
++  auto request = std::make_unique<network::ResourceRequest>();
++  request->url = std::move(url);
++  request->method = "GET";
++  request->credentials_mode = network::mojom::CredentialsMode::kOmit;
++  request->load_flags = net::LOAD_DISABLE_CACHE | net::LOAD_BYPASS_CACHE |
++                       net::LOAD_DO_NOT_SAVE_COOKIES;
++
++  loader_ = network::SimpleURLLoader::Create(std::move(request),
++                                             kTrafficAnnotation);
++  loader_->DownloadToFile(
++      factory_.get(),
++      base::BindOnce(&PayloadFetcher::OnDownloaded,
++                     weak_factory_.GetWeakPtr()),
++      payload_path, max_payload_bytes_);
++}
++
++void PayloadFetcher::OnDownloaded(base::FilePath path) {
++  if (path.empty()) {
++    PayloadFetchResult result;
++    result.error = PayloadFetchError::kNetwork;
++    if (callback_) {
++      std::move(callback_).Run(std::move(result));
++    }
++    return;
++  }
++  blocking_runner_->PostTaskAndReplyWithResult(
++      FROM_HERE,
++      base::BindOnce(&PayloadFetcher::VerifyOnBlockingThread, path,
++                     expected_length_, expected_sha256_),
++      base::BindOnce(&PayloadFetcher::OnVerified,
++                     weak_factory_.GetWeakPtr()));
++}
++
++// static
++PayloadFetcher::VerifyOutcome PayloadFetcher::VerifyOnBlockingThread(
++    base::FilePath path,
++    uint64_t expected_length,
++    std::array<uint8_t, 32> expected_sha256) {
++  VerifyOutcome out{PayloadFetchError::kOk, {}};
++  std::optional<int64_t> file_size = base::GetFileSize(path);
++  if (!file_size.has_value() || *file_size < 0) {
++    base::DeleteFile(path);
++    out.error = PayloadFetchError::kIo;
++    return out;
++  }
++  if (static_cast<uint64_t>(*file_size) != expected_length) {
++    base::DeleteFile(path);
++    out.error = PayloadFetchError::kLengthMismatch;
++    return out;
++  }
++  std::string contents;
++  if (!base::ReadFileToString(path, &contents)) {
++    base::DeleteFile(path);
++    out.error = PayloadFetchError::kIo;
++    return out;
++  }
++  std::array<uint8_t, 32> got = crypto::hash::Sha256(contents);
++  if (got != expected_sha256) {
++    base::DeleteFile(path);
++    out.error = PayloadFetchError::kHashMismatch;
++    return out;
++  }
++  out.path = std::move(path);
++  return out;
++}
++
++void PayloadFetcher::OnVerified(VerifyOutcome outcome) {
++  loader_.reset();
++  PayloadFetchResult result;
++  result.error = outcome.error;
++  result.payload_path = std::move(outcome.path);
++  if (callback_) {
++    std::move(callback_).Run(std::move(result));
++  }
++}
++
++}  // namespace phlink::updater
+diff --git a/chrome/browser/phlink/updater/payload_fetcher.h b/chrome/browser/phlink/updater/payload_fetcher.h
+new file mode 100644
+index 0000000000000..bee5e835637b1
+--- /dev/null
++++ b/chrome/browser/phlink/updater/payload_fetcher.h
+@@ -0,0 +1,99 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_PHLINK_UPDATER_PAYLOAD_FETCHER_H_
++#define CHROME_BROWSER_PHLINK_UPDATER_PAYLOAD_FETCHER_H_
++
++#include <array>
++#include <cstdint>
++#include <memory>
++
++#include "base/files/file_path.h"
++#include "base/functional/callback.h"
++#include "base/memory/scoped_refptr.h"
++#include "base/memory/weak_ptr.h"
++#include "url/gurl.h"
++
++namespace base {
++class SequencedTaskRunner;
++}
++
++namespace network {
++class SharedURLLoaderFactory;
++class SimpleURLLoader;
++}  // namespace network
++
++namespace phlink::updater {
++
++// Result of a single payload fetch.
++enum class PayloadFetchError {
++  kOk,
++  kNetwork,         // SimpleURLLoader returned an empty path.
++  kIo,              // file unreadable on disk after download.
++  kLengthMismatch,  // file size != targets.json `length`.
++  kHashMismatch,    // sha256(file) != targets.json `hashes.sha256`.
++};
++struct PayloadFetchResult {
++  PayloadFetchError error = PayloadFetchError::kOk;
++  base::FilePath payload_path;  // valid only if `error == kOk`.
++};
++
++// Downloads a payload over `network::SimpleURLLoader::DownloadToFile` and
++// verifies its length and SHA-256 against the values found in
++// `targets.json`. On verification failure the staged file is deleted.
++//
++// One-shot: construct, call `Fetch`, await callback, drop.
++class PayloadFetcher {
++ public:
++  using ResultCallback = base::OnceCallback<void(PayloadFetchResult)>;
++
++  // `staging_dir` is created if missing. The downloaded file is written
++  // to `staging_dir/payload.zip`.
++  PayloadFetcher(scoped_refptr<network::SharedURLLoaderFactory> factory,
++                 base::FilePath staging_dir);
++  PayloadFetcher(const PayloadFetcher&) = delete;
++  PayloadFetcher& operator=(const PayloadFetcher&) = delete;
++  ~PayloadFetcher();
++
++  // Inject a custom blocking task runner (tests use the test environment's
++  // thread pool by default).
++  void set_blocking_task_runner_for_testing(
++      scoped_refptr<base::SequencedTaskRunner> runner);
++
++  // Cap on payload size in bytes. Defaults to 512 MiB.
++  void set_max_payload_bytes_for_testing(int64_t max_bytes);
++
++  void Fetch(GURL url,
++             uint64_t expected_length,
++             std::array<uint8_t, 32> expected_sha256,
++             ResultCallback callback);
++
++ private:
++  struct VerifyOutcome {
++    PayloadFetchError error;
++    base::FilePath path;  // empty unless `error == kOk`.
++  };
++
++  void OnDownloaded(base::FilePath path);
++  static VerifyOutcome VerifyOnBlockingThread(
++      base::FilePath path,
++      uint64_t expected_length,
++      std::array<uint8_t, 32> expected_sha256);
++  void OnVerified(VerifyOutcome outcome);
++
++  scoped_refptr<network::SharedURLLoaderFactory> factory_;
++  const base::FilePath staging_dir_;
++  scoped_refptr<base::SequencedTaskRunner> blocking_runner_;
++  int64_t max_payload_bytes_ = 512LL * 1024 * 1024;
++
++  std::unique_ptr<network::SimpleURLLoader> loader_;
++  ResultCallback callback_;
++  uint64_t expected_length_ = 0;
++  std::array<uint8_t, 32> expected_sha256_{};
++  base::WeakPtrFactory<PayloadFetcher> weak_factory_{this};
++};
++
++}  // namespace phlink::updater
++
++#endif  // CHROME_BROWSER_PHLINK_UPDATER_PAYLOAD_FETCHER_H_
+diff --git a/chrome/browser/phlink/updater/payload_fetcher_unittest.cc b/chrome/browser/phlink/updater/payload_fetcher_unittest.cc
+new file mode 100644
+index 0000000000000..2508d4801b774
+--- /dev/null
++++ b/chrome/browser/phlink/updater/payload_fetcher_unittest.cc
+@@ -0,0 +1,104 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/phlink/updater/payload_fetcher.h"
++
++#include <array>
++#include <string>
++
++#include "base/files/file_util.h"
++#include "base/files/scoped_temp_dir.h"
++#include "base/run_loop.h"
++#include "base/test/bind.h"
++#include "base/test/task_environment.h"
++#include "crypto/hash.h"
++#include "net/http/http_status_code.h"
++#include "services/network/public/cpp/weak_wrapper_shared_url_loader_factory.h"
++#include "services/network/public/mojom/url_response_head.mojom.h"
++#include "services/network/test/test_url_loader_factory.h"
++#include "testing/gtest/include/gtest/gtest.h"
++#include "url/gurl.h"
++
++namespace phlink::updater {
++namespace {
++
++class PayloadFetcherTest : public ::testing::Test {
++ protected:
++  PayloadFetcherTest()
++      : shared_factory_(loader_factory_.GetSafeWeakWrapper()) {}
++
++  void SetUp() override { ASSERT_TRUE(temp_dir_.CreateUniqueTempDir()); }
++
++  base::FilePath staging() const { return temp_dir_.GetPath(); }
++
++  PayloadFetchResult RunFetch(GURL url,
++                              uint64_t expected_length,
++                              std::array<uint8_t, 32> expected_sha256) {
++    PayloadFetcher fetcher(shared_factory_, staging());
++    base::RunLoop run_loop;
++    PayloadFetchResult got;
++    fetcher.Fetch(std::move(url), expected_length, expected_sha256,
++                  base::BindLambdaForTesting([&](PayloadFetchResult r) {
++                    got = std::move(r);
++                    run_loop.Quit();
++                  }));
++    run_loop.Run();
++    return got;
++  }
++
++  base::test::TaskEnvironment task_env_;
++  base::ScopedTempDir temp_dir_;
++  network::TestURLLoaderFactory loader_factory_;
++  scoped_refptr<network::WeakWrapperSharedURLLoaderFactory> shared_factory_;
++};
++
++TEST_F(PayloadFetcherTest, HappyPathDownloadsAndVerifies) {
++  const std::string body = "hello phlink payload";
++  const GURL url("https://updates.example/payload.zip");
++  loader_factory_.AddResponse(url.spec(), body, net::HTTP_OK);
++
++  PayloadFetchResult got =
++      RunFetch(url, body.size(), crypto::hash::Sha256(body));
++  EXPECT_EQ(got.error, PayloadFetchError::kOk);
++  EXPECT_TRUE(base::PathExists(got.payload_path));
++  std::string on_disk;
++  ASSERT_TRUE(base::ReadFileToString(got.payload_path, &on_disk));
++  EXPECT_EQ(on_disk, body);
++}
++
++TEST_F(PayloadFetcherTest, HashMismatchDeletesFile) {
++  const std::string body = "actual bytes";
++  const GURL url("https://updates.example/payload.zip");
++  loader_factory_.AddResponse(url.spec(), body, net::HTTP_OK);
++
++  std::array<uint8_t, 32> wrong = crypto::hash::Sha256("different");
++  PayloadFetchResult got = RunFetch(url, body.size(), wrong);
++  EXPECT_EQ(got.error, PayloadFetchError::kHashMismatch);
++  EXPECT_TRUE(got.payload_path.empty());
++  EXPECT_FALSE(base::PathExists(staging().Append(FILE_PATH_LITERAL("payload.zip"))));
++}
++
++TEST_F(PayloadFetcherTest, LengthMismatchDeletesFile) {
++  const std::string body = "ten chars!";  // 10 bytes
++  const GURL url("https://updates.example/payload.zip");
++  loader_factory_.AddResponse(url.spec(), body, net::HTTP_OK);
++
++  PayloadFetchResult got =
++      RunFetch(url, /*expected_length=*/999, crypto::hash::Sha256(body));
++  EXPECT_EQ(got.error, PayloadFetchError::kLengthMismatch);
++  EXPECT_FALSE(base::PathExists(staging().Append(FILE_PATH_LITERAL("payload.zip"))));
++}
++
++TEST_F(PayloadFetcherTest, NetworkErrorReportsKNetwork) {
++  const GURL url("https://updates.example/payload.zip");
++  loader_factory_.AddResponse(url.spec(), /*content=*/"",
++                              net::HTTP_INTERNAL_SERVER_ERROR);
++
++  PayloadFetchResult got =
++      RunFetch(url, /*expected_length=*/1, std::array<uint8_t, 32>{});
++  EXPECT_EQ(got.error, PayloadFetchError::kNetwork);
++}
++
++}  // namespace
++}  // namespace phlink::updater
+diff --git a/chrome/browser/phlink/updater/staged_payload.cc b/chrome/browser/phlink/updater/staged_payload.cc
+new file mode 100644
+index 0000000000000..30923979b0e7e
+--- /dev/null
++++ b/chrome/browser/phlink/updater/staged_payload.cc
+@@ -0,0 +1,85 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/phlink/updater/staged_payload.h"
++
++#include <string_view>
++#include <utility>
++
++#include "base/files/file_util.h"
++#include "base/files/important_file_writer.h"
++#include "base/json/json_reader.h"
++#include "base/json/json_writer.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/time/time.h"
++#include "base/values.h"
++
++namespace phlink::updater {
++namespace {
++
++constexpr char kStagedJsonFileName[] = "staged.json";
++constexpr int kSchemaVersion = 1;
++
++constexpr char kKeySchema[] = "schema";
++constexpr char kKeyVersion[] = "version";
++constexpr char kKeyPayloadPath[] = "payload_path";
++constexpr char kKeyVerifiedAt[] = "verified_at";
++
++}  // namespace
++
++bool WriteStagedPayloadJson(const base::FilePath& dir,
++                            const StagedPayload& staged) {
++  if (!base::DirectoryExists(dir) && !base::CreateDirectory(dir)) {
++    return false;
++  }
++  base::DictValue dict;
++  dict.Set(kKeySchema, kSchemaVersion);
++  dict.Set(kKeyVersion, staged.version);
++  dict.Set(kKeyPayloadPath, staged.payload_path.AsUTF8Unsafe());
++  dict.Set(kKeyVerifiedAt,
++           base::NumberToString(
++               staged.verified_at.ToDeltaSinceWindowsEpoch().InMicroseconds()));
++  std::optional<std::string> json = base::WriteJson(dict);
++  if (!json.has_value()) {
++    return false;
++  }
++  return base::ImportantFileWriter::WriteFileAtomically(
++      dir.AppendASCII(kStagedJsonFileName), *json);
++}
++
++std::optional<StagedPayload> ReadStagedPayloadJson(
++    const base::FilePath& dir) {
++  base::FilePath path = dir.AppendASCII(kStagedJsonFileName);
++  std::string contents;
++  if (!base::ReadFileToString(path, &contents)) {
++    return std::nullopt;
++  }
++  std::optional<base::DictValue> d_opt =
++      base::JSONReader::ReadDict(contents, base::JSON_PARSE_RFC);
++  if (!d_opt) {
++    return std::nullopt;
++  }
++  const base::DictValue& d = *d_opt;
++  std::optional<int> schema = d.FindInt(kKeySchema);
++  const std::string* version = d.FindString(kKeyVersion);
++  const std::string* payload_path = d.FindString(kKeyPayloadPath);
++  const std::string* verified_at = d.FindString(kKeyVerifiedAt);
++  if (!schema || *schema != kSchemaVersion || !version || !payload_path ||
++      !verified_at) {
++    return std::nullopt;
++  }
++  base::Time t;
++  int64_t micros = 0;
++  if (!base::StringToInt64(*verified_at, &micros)) {
++    return std::nullopt;
++  }
++  t = base::Time::FromDeltaSinceWindowsEpoch(base::Microseconds(micros));
++  StagedPayload out;
++  out.version = *version;
++  out.payload_path = base::FilePath::FromUTF8Unsafe(*payload_path);
++  out.verified_at = t;
++  return out;
++}
++
++}  // namespace phlink::updater
+diff --git a/chrome/browser/phlink/updater/staged_payload.h b/chrome/browser/phlink/updater/staged_payload.h
+new file mode 100644
+index 0000000000000..88248011aecbe
+--- /dev/null
++++ b/chrome/browser/phlink/updater/staged_payload.h
+@@ -0,0 +1,42 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_PHLINK_UPDATER_STAGED_PAYLOAD_H_
++#define CHROME_BROWSER_PHLINK_UPDATER_STAGED_PAYLOAD_H_
++
++#include <optional>
++#include <string>
++
++#include "base/files/file_path.h"
++#include "base/time/time.h"
++
++namespace phlink::updater {
++
++// Persistent record of "the latest payload that has been verified and
++// is sitting on disk waiting for the next launch's helper to apply it".
++// Schema (v1):
++//   {
++//     "schema": 1,
++//     "version": "1.2.3",
++//     "payload_path": "<absolute path>",
++//     "verified_at": "<RFC3339 UTC>"
++//   }
++struct StagedPayload {
++  std::string version;
++  base::FilePath payload_path;
++  base::Time verified_at;
++};
++
++// Writes `staged.json` atomically (write-temp + rename). Returns false
++// on I/O error. The file is written under `dir` (which must exist).
++bool WriteStagedPayloadJson(const base::FilePath& dir,
++                            const StagedPayload& staged);
++
++// Reads `staged.json` from `dir`. Returns nullopt if missing or
++// malformed.
++std::optional<StagedPayload> ReadStagedPayloadJson(const base::FilePath& dir);
++
++}  // namespace phlink::updater
++
++#endif  // CHROME_BROWSER_PHLINK_UPDATER_STAGED_PAYLOAD_H_
+diff --git a/chrome/browser/phlink/updater/staged_payload_unittest.cc b/chrome/browser/phlink/updater/staged_payload_unittest.cc
+new file mode 100644
+index 0000000000000..c4a59b5e703d6
+--- /dev/null
++++ b/chrome/browser/phlink/updater/staged_payload_unittest.cc
+@@ -0,0 +1,60 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/phlink/updater/staged_payload.h"
++
++#include "base/files/file_path.h"
++#include "base/files/file_util.h"
++#include "base/files/scoped_temp_dir.h"
++#include "base/time/time.h"
++#include "testing/gtest/include/gtest/gtest.h"
++
++namespace phlink::updater {
++namespace {
++
++class StagedPayloadTest : public ::testing::Test {
++ protected:
++  void SetUp() override { ASSERT_TRUE(temp_dir_.CreateUniqueTempDir()); }
++  base::FilePath dir() const { return temp_dir_.GetPath(); }
++  base::ScopedTempDir temp_dir_;
++};
++
++TEST_F(StagedPayloadTest, RoundTrip) {
++  StagedPayload in;
++  in.version = "1.2.3";
++  in.payload_path = dir().Append(FILE_PATH_LITERAL("Updates"))
++                        .Append(FILE_PATH_LITERAL("1.2.3"))
++                        .Append(FILE_PATH_LITERAL("payload.zip"));
++  in.verified_at = base::Time::FromDeltaSinceWindowsEpoch(
++      base::Microseconds(1700000000123456));
++
++  ASSERT_TRUE(WriteStagedPayloadJson(dir(), in));
++  EXPECT_TRUE(base::PathExists(dir().AppendASCII("staged.json")));
++
++  std::optional<StagedPayload> out = ReadStagedPayloadJson(dir());
++  ASSERT_TRUE(out.has_value());
++  EXPECT_EQ(out->version, in.version);
++  EXPECT_EQ(out->payload_path, in.payload_path);
++  EXPECT_EQ(out->verified_at, in.verified_at);
++}
++
++TEST_F(StagedPayloadTest, MissingFileReturnsNullopt) {
++  EXPECT_FALSE(ReadStagedPayloadJson(dir()).has_value());
++}
++
++TEST_F(StagedPayloadTest, MalformedJsonReturnsNullopt) {
++  ASSERT_TRUE(base::WriteFile(dir().AppendASCII("staged.json"),
++                              "not even json {{{"));
++  EXPECT_FALSE(ReadStagedPayloadJson(dir()).has_value());
++}
++
++TEST_F(StagedPayloadTest, WrongSchemaReturnsNullopt) {
++  ASSERT_TRUE(base::WriteFile(
++      dir().AppendASCII("staged.json"),
++      R"({"schema":99,"version":"1","payload_path":"/x","verified_at":"0"})"));
++  EXPECT_FALSE(ReadStagedPayloadJson(dir()).has_value());
++}
++
++}  // namespace
++}  // namespace phlink::updater
+-- 
+2.50.1 (Apple Git-155)
+
