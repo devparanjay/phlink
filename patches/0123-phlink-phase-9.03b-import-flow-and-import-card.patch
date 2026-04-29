@@ -1,0 +1,961 @@
+From 9cda997d32b306910eac1327a60437c379e1b115 Mon Sep 17 00:00:00 2001
+From: phlink <phlink@local>
+Date: Wed, 29 Apr 2026 22:49:29 +0530
+Subject: [PATCH] phlink: phase 9 plan 09-03b import flow +
+ chrome://portability Import card
+
+---
+ chrome/browser/phlink/portability/BUILD.gn    |  38 ++++
+ .../phlink/portability/import_service.cc      | 139 ++++++++++++
+ .../phlink/portability/import_service.h       |  49 +++++
+ .../portability/import_service_unittest.cc    |  74 +++++++
+ .../phlink/portability/importer_impl.cc       | 202 ++++++++++++++++++
+ .../phlink/portability/importer_impl.h        |  79 +++++++
+ .../phlink/portability/portability.mojom      |  39 ++++
+ chrome/browser/resources/portability/app.html |  22 +-
+ chrome/browser/resources/portability/app.ts   |  64 +++++-
+ .../resources/portability/browser_proxy.ts    |  12 +-
+ chrome/browser/ui/webui/portability/BUILD.gn  |   1 +
+ .../ui/webui/portability/portability_ui.cc    |  25 ++-
+ .../ui/webui/portability/portability_ui.h     |   4 +
+ 13 files changed, 742 insertions(+), 6 deletions(-)
+ create mode 100644 chrome/browser/phlink/portability/import_service.cc
+ create mode 100644 chrome/browser/phlink/portability/import_service.h
+ create mode 100644 chrome/browser/phlink/portability/import_service_unittest.cc
+ create mode 100644 chrome/browser/phlink/portability/importer_impl.cc
+ create mode 100644 chrome/browser/phlink/portability/importer_impl.h
+
+diff --git a/chrome/browser/phlink/portability/BUILD.gn b/chrome/browser/phlink/portability/BUILD.gn
+index 419e4ea3181bb..9b41b8c7ac19a 100644
+--- a/chrome/browser/phlink/portability/BUILD.gn
++++ b/chrome/browser/phlink/portability/BUILD.gn
+@@ -70,6 +70,22 @@ source_set("export_service") {
+   ]
+ }
+ 
++# Profile-decoupled import driver. Takes a bundle_path + passphrase +
++# dest_profile_dir and unpacks the sealed `.phlinkbundle` into the
++# directory, validating manifest sha256 hashes as a programmer-error
++# guard on top of the AEAD tag.
++source_set("import_service") {
++  sources = [
++    "import_service.cc",
++    "import_service.h",
++  ]
++  deps = [
++    ":bundle_codec",
++    "//base",
++    "//crypto",
++  ]
++}
++
+ # Profile-aware mojo Exporter implementation that drives `:export_service`
+ # and exposes a SelectFileDialog-backed Save-As to chrome://portability.
+ source_set("exporter_impl") {
+@@ -89,17 +105,39 @@ source_set("exporter_impl") {
+   ]
+ }
+ 
++# Profile-aware mojo Importer implementation that drives `:import_service`
++# and creates a fresh profile via ProfileManager.
++source_set("importer_impl") {
++  sources = [
++    "importer_impl.cc",
++    "importer_impl.h",
++  ]
++  deps = [
++    ":import_service",
++    ":portability_mojom",
++    "//base",
++    "//chrome/browser/profiles:profile",
++    "//chrome/browser/profiles:profile_manager",
++    "//chrome/browser/ui/select_file_policy",
++    "//content/public/browser",
++    "//mojo/public/cpp/bindings",
++    "//ui/shell_dialogs",
++  ]
++}
++
+ source_set("unit_tests") {
+   testonly = true
+   sources = [
+     "bundle_reader_unittest.cc",
+     "bundle_writer_unittest.cc",
+     "export_service_unittest.cc",
++    "import_service_unittest.cc",
+     "phlink_crypto_unittest.cc",
+   ]
+   deps = [
+     ":bundle_codec",
+     ":export_service",
++    ":import_service",
+     ":phlink_crypto",
+     "//base",
+     "//testing/gtest",
+diff --git a/chrome/browser/phlink/portability/import_service.cc b/chrome/browser/phlink/portability/import_service.cc
+new file mode 100644
+index 0000000000000..34539345dc76b
+--- /dev/null
++++ b/chrome/browser/phlink/portability/import_service.cc
+@@ -0,0 +1,139 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/phlink/portability/import_service.h"
++
++#include <string>
++#include <string_view>
++
++#include "base/files/file_util.h"
++#include "base/json/json_reader.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/values.h"
++#include "chrome/browser/phlink/portability/bundle_reader.h"
++#include "crypto/sha2.h"
++
++namespace phlink::portability {
++
++ImportStatus FromReaderStatus(BundleReader::Status s) {
++  switch (s) {
++    case BundleReader::Status::kOk:
++      return ImportStatus::kOk;
++    case BundleReader::Status::kBadMagic:
++      return ImportStatus::kBadMagic;
++    case BundleReader::Status::kUnsupportedVersion:
++      return ImportStatus::kUnsupportedVersion;
++    case BundleReader::Status::kUnknownPrimitive:
++      return ImportStatus::kUnknownPrimitive;
++    case BundleReader::Status::kBadPassphrase:
++      return ImportStatus::kBadPassphrase;
++    case BundleReader::Status::kIntegrity:
++      return ImportStatus::kIntegrity;
++    case BundleReader::Status::kTruncated:
++      return ImportStatus::kTruncated;
++    case BundleReader::Status::kIo:
++      return ImportStatus::kIo;
++  }
++}
++
++namespace {
++
++std::string ToHexLower(base::span<const uint8_t> bytes) {
++  static const char kHex[] = "0123456789abcdef";
++  std::string out;
++  out.reserve(bytes.size() * 2);
++  for (uint8_t b : bytes) {
++    out.push_back(kHex[(b >> 4) & 0xF]);
++    out.push_back(kHex[b & 0xF]);
++  }
++  return out;
++}
++
++// Validates each entry's sha256 against the manifest's `entries` array.
++// Returns true if every entry matches; returns true even for an empty
++// or absent `entries` array (defensive — older bundles may omit it).
++bool VerifyManifestHashes(
++    base::span<const uint8_t> manifest_bytes,
++    const std::map<std::string, std::vector<uint8_t>>& entries) {
++  std::string_view manifest_str(
++      reinterpret_cast<const char*>(manifest_bytes.data()),
++      manifest_bytes.size());
++  std::optional<base::DictValue> root =
++      base::JSONReader::ReadDict(manifest_str, base::JSON_PARSE_RFC);
++  if (!root) {
++    return false;
++  }
++  const base::ListValue* arr = root->FindList("entries");
++  if (!arr) {
++    return true;
++  }
++  for (const base::Value& v : *arr) {
++    if (!v.is_dict()) {
++      return false;
++    }
++    const std::string* path = v.GetDict().FindString("path");
++    const std::string* sha = v.GetDict().FindString("sha256");
++    if (!path || !sha) {
++      return false;
++    }
++    auto it = entries.find(*path);
++    if (it == entries.end()) {
++      return false;
++    }
++    auto digest = crypto::SHA256Hash(it->second);
++    if (ToHexLower(digest) != *sha) {
++      return false;
++    }
++  }
++  return true;
++}
++
++}  // namespace
++
++ImportStatus ImportBundleToDir(const base::FilePath& bundle_path,
++                               std::string_view passphrase,
++                               const base::FilePath& dest_profile_dir) {
++  if (passphrase.empty()) {
++    return ImportStatus::kBadPassphrase;
++  }
++  if (dest_profile_dir.empty()) {
++    return ImportStatus::kIo;
++  }
++  if (!base::CreateDirectory(dest_profile_dir)) {
++    return ImportStatus::kIo;
++  }
++
++  BundleReader reader;
++  BundleReader::Status rs = reader.OpenFile(bundle_path, passphrase);
++  if (rs != BundleReader::Status::kOk) {
++    return FromReaderStatus(rs);
++  }
++
++  if (!VerifyManifestHashes(reader.Manifest(), reader.Entries())) {
++    return ImportStatus::kIntegrity;
++  }
++
++  for (const auto& [name, bytes] : reader.Entries()) {
++    // Reject any entry whose virtual path tries to escape the profile
++    // directory (defence in depth — `BundleReader` already rejects
++    // absolute paths and `..` segments at parse time, but never trust
++    // a single layer).
++    base::FilePath rel = base::FilePath::FromASCII(name);
++    if (rel.IsAbsolute() || rel.ReferencesParent()) {
++      return ImportStatus::kIntegrity;
++    }
++    base::FilePath dst = dest_profile_dir.Append(rel);
++    base::FilePath dst_parent = dst.DirName();
++    if (!base::CreateDirectory(dst_parent)) {
++      return ImportStatus::kIo;
++    }
++    if (!base::WriteFile(dst, bytes)) {
++      return ImportStatus::kIo;
++    }
++  }
++
++  return ImportStatus::kOk;
++}
++
++}  // namespace phlink::portability
+diff --git a/chrome/browser/phlink/portability/import_service.h b/chrome/browser/phlink/portability/import_service.h
+new file mode 100644
+index 0000000000000..913f1c5cd7c5c
+--- /dev/null
++++ b/chrome/browser/phlink/portability/import_service.h
+@@ -0,0 +1,49 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_PHLINK_PORTABILITY_IMPORT_SERVICE_H_
++#define CHROME_BROWSER_PHLINK_PORTABILITY_IMPORT_SERVICE_H_
++
++#include <string_view>
++
++#include "base/files/file_path.h"
++#include "chrome/browser/phlink/portability/bundle_reader.h"
++
++namespace phlink::portability {
++
++// Mirrors `phlink.portability.mojom.ImportStatus`. The `BundleReader`
++// failure codes are surfaced verbatim, plus a few service-level codes
++// for ProfileManager failures.
++enum class ImportStatus {
++  kOk,
++  kBadMagic,
++  kUnsupportedVersion,
++  kUnknownPrimitive,
++  kBadPassphrase,
++  kIntegrity,
++  kTruncated,
++  kIo,
++  kProfileCreationFailed,
++};
++
++// Helper: lossless map from `BundleReader::Status` → `ImportStatus`.
++ImportStatus FromReaderStatus(BundleReader::Status s);
++
++// Decrypts `bundle_path` with `passphrase` and writes each tar entry
++// into `dest_profile_dir`. Files that already exist in
++// `dest_profile_dir` (e.g. defaults Chromium just created when the
++// profile was minted) are overwritten.
++//
++// Validates each entry's sha256 against `MANIFEST.json::entries` as a
++// programmer-error guard, even though the AEAD tag already covers the
++// whole payload (cheap, catches manifest/tar drift).
++//
++// Blocking — call on a `base::ThreadPool` worker.
++ImportStatus ImportBundleToDir(const base::FilePath& bundle_path,
++                               std::string_view passphrase,
++                               const base::FilePath& dest_profile_dir);
++
++}  // namespace phlink::portability
++
++#endif  // CHROME_BROWSER_PHLINK_PORTABILITY_IMPORT_SERVICE_H_
+diff --git a/chrome/browser/phlink/portability/import_service_unittest.cc b/chrome/browser/phlink/portability/import_service_unittest.cc
+new file mode 100644
+index 0000000000000..776d8986edb8a
+--- /dev/null
++++ b/chrome/browser/phlink/portability/import_service_unittest.cc
+@@ -0,0 +1,74 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/phlink/portability/import_service.h"
++
++#include <string>
++
++#include "base/files/file_util.h"
++#include "base/files/scoped_temp_dir.h"
++#include "chrome/browser/phlink/portability/export_service.h"
++#include "testing/gtest/include/gtest/gtest.h"
++
++namespace phlink::portability {
++namespace {
++
++base::FilePath WriteSealedBundleFromTempProfile(base::ScopedTempDir* profile,
++                                                base::ScopedTempDir* out_dir,
++                                                std::string_view passphrase) {
++  CHECK(profile->CreateUniqueTempDir());
++  CHECK(base::WriteFile(profile->GetPath().AppendASCII("Bookmarks"),
++                        "{\"roots\":\"bm\"}"));
++  CHECK(base::WriteFile(profile->GetPath().AppendASCII("Preferences"),
++                        "{\"theme\":\"dark\"}"));
++
++  CHECK(out_dir->CreateUniqueTempDir());
++  base::FilePath dest = out_dir->GetPath().AppendASCII("out.phlinkbundle");
++  CHECK_EQ(ExportProfileToBundle(profile->GetPath(), dest, passphrase),
++           ExportStatus::kOk);
++  return dest;
++}
++
++TEST(ImportServiceTest, RejectsEmptyPassphrase) {
++  base::ScopedTempDir tmp;
++  ASSERT_TRUE(tmp.CreateUniqueTempDir());
++  EXPECT_EQ(ImportBundleToDir(base::FilePath(FILE_PATH_LITERAL("nope")),
++                              "", tmp.GetPath()),
++            ImportStatus::kBadPassphrase);
++}
++
++TEST(ImportServiceTest, RejectsBadPassphrase) {
++  base::ScopedTempDir profile;
++  base::ScopedTempDir out;
++  base::FilePath bundle =
++      WriteSealedBundleFromTempProfile(&profile, &out, "right-pw");
++
++  base::ScopedTempDir dest;
++  ASSERT_TRUE(dest.CreateUniqueTempDir());
++  EXPECT_EQ(ImportBundleToDir(bundle, "wrong-pw", dest.GetPath()),
++            ImportStatus::kBadPassphrase);
++}
++
++TEST(ImportServiceTest, RoundTripWritesEntriesIntoDir) {
++  base::ScopedTempDir profile;
++  base::ScopedTempDir out;
++  base::FilePath bundle =
++      WriteSealedBundleFromTempProfile(&profile, &out, "pw");
++
++  base::ScopedTempDir dest;
++  ASSERT_TRUE(dest.CreateUniqueTempDir());
++  ASSERT_EQ(ImportBundleToDir(bundle, "pw", dest.GetPath()), ImportStatus::kOk);
++
++  std::string bookmarks;
++  std::string preferences;
++  ASSERT_TRUE(base::ReadFileToString(dest.GetPath().AppendASCII("Bookmarks"),
++                                     &bookmarks));
++  ASSERT_TRUE(base::ReadFileToString(dest.GetPath().AppendASCII("Preferences"),
++                                     &preferences));
++  EXPECT_EQ(bookmarks, "{\"roots\":\"bm\"}");
++  EXPECT_EQ(preferences, "{\"theme\":\"dark\"}");
++}
++
++}  // namespace
++}  // namespace phlink::portability
+diff --git a/chrome/browser/phlink/portability/importer_impl.cc b/chrome/browser/phlink/portability/importer_impl.cc
+new file mode 100644
+index 0000000000000..2223cf442a44c
+--- /dev/null
++++ b/chrome/browser/phlink/portability/importer_impl.cc
+@@ -0,0 +1,202 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/phlink/portability/importer_impl.h"
++
++#include <string>
++#include <utility>
++
++#include "base/files/file_util.h"
++#include "base/functional/bind.h"
++#include "base/strings/stringprintf.h"
++#include "base/strings/utf_string_conversions.h"
++#include "base/task/task_traits.h"
++#include "base/task/thread_pool.h"
++#include "base/time/time.h"
++#include "chrome/browser/phlink/portability/import_service.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/profiles/profile_manager.h"
++#include "chrome/browser/ui/select_file_policy/chrome_select_file_policy.h"
++#include "content/public/browser/web_contents.h"
++#include "ui/shell_dialogs/select_file_dialog.h"
++#include "ui/shell_dialogs/selected_file_info.h"
++
++namespace phlink::portability {
++namespace {
++
++mojom::ImportStatus ToMojom(ImportStatus s) {
++  switch (s) {
++    case ImportStatus::kOk:
++      return mojom::ImportStatus::kOk;
++    case ImportStatus::kBadMagic:
++      return mojom::ImportStatus::kBadMagic;
++    case ImportStatus::kUnsupportedVersion:
++      return mojom::ImportStatus::kUnsupportedVersion;
++    case ImportStatus::kUnknownPrimitive:
++      return mojom::ImportStatus::kUnknownPrimitive;
++    case ImportStatus::kBadPassphrase:
++      return mojom::ImportStatus::kBadPassphrase;
++    case ImportStatus::kIntegrity:
++      return mojom::ImportStatus::kIntegrity;
++    case ImportStatus::kTruncated:
++      return mojom::ImportStatus::kTruncated;
++    case ImportStatus::kIo:
++      return mojom::ImportStatus::kIo;
++    case ImportStatus::kProfileCreationFailed:
++      return mojom::ImportStatus::kProfileCreationFailed;
++  }
++}
++
++ImportStatus RunImportOnWorker(base::FilePath bundle_path,
++                               std::string passphrase,
++                               base::FilePath dest_dir) {
++  return ImportBundleToDir(bundle_path, passphrase, dest_dir);
++}
++
++std::u16string MakeImportedProfileName(base::Time now) {
++  base::Time::Exploded e;
++  now.UTCExplode(&e);
++  // Stable English label; the spec calls for ISO-8601 timestamp.
++  return base::ASCIIToUTF16(base::StringPrintf(
++      "Imported %04d-%02d-%02dT%02d:%02d:%02dZ", e.year, e.month, e.day_of_month,
++      e.hour, e.minute, e.second));
++}
++
++void DeleteProfileDirOnWorker(base::FilePath dir) {
++  base::DeletePathRecursively(dir);
++}
++
++}  // namespace
++
++ImporterImpl::ImporterImpl(content::WebContents* web_contents,
++                           mojo::PendingReceiver<mojom::Importer> receiver)
++    : content::WebContentsObserver(web_contents),
++      receiver_(this, std::move(receiver)) {}
++
++ImporterImpl::~ImporterImpl() {
++  if (select_file_dialog_) {
++    select_file_dialog_->ListenerDestroyed();
++  }
++  if (pending_picker_callback_) {
++    std::move(pending_picker_callback_)
++        .Run(mojom::ImportStatus::kIo, base::FilePath());
++  }
++}
++
++void ImporterImpl::Import(const base::FilePath& path,
++                          const std::string& passphrase,
++                          ImportCallback callback) {
++  if (passphrase.empty()) {
++    std::move(callback).Run(mojom::ImportStatus::kBadPassphrase,
++                            base::FilePath());
++    return;
++  }
++  if (path.empty()) {
++    std::move(callback).Run(mojom::ImportStatus::kIo, base::FilePath());
++    return;
++  }
++
++  ProfileManager::CreateMultiProfileAsync(
++      MakeImportedProfileName(base::Time::Now()),
++      /*icon_index=*/0,
++      /*is_hidden=*/false,
++      base::BindOnce(&ImporterImpl::OnProfileCreated,
++                     weak_factory_.GetWeakPtr(), path, passphrase,
++                     std::move(callback)));
++}
++
++void ImporterImpl::ImportFromPickedFile(
++    const std::string& passphrase,
++    ImportFromPickedFileCallback callback) {
++  if (pending_picker_callback_) {
++    std::move(callback).Run(mojom::ImportStatus::kIo, base::FilePath());
++    return;
++  }
++  if (passphrase.empty()) {
++    std::move(callback).Run(mojom::ImportStatus::kBadPassphrase,
++                            base::FilePath());
++    return;
++  }
++  content::WebContents* wc = web_contents();
++  if (!wc) {
++    std::move(callback).Run(mojom::ImportStatus::kIo, base::FilePath());
++    return;
++  }
++
++  pending_picker_callback_ = std::move(callback);
++  pending_passphrase_ = passphrase;
++
++  select_file_dialog_ = ui::SelectFileDialog::Create(
++      this, std::make_unique<ChromeSelectFilePolicy>(wc));
++  ui::SelectFileDialog::FileTypeInfo file_types;
++  file_types.extensions = {{FILE_PATH_LITERAL("phlinkbundle")}};
++  file_types.include_all_files = true;
++
++  select_file_dialog_->SelectFile(
++      ui::SelectFileDialog::SELECT_OPEN_FILE,
++      /*title=*/std::u16string(), base::FilePath(), &file_types,
++      /*file_type_index=*/1, FILE_PATH_LITERAL("phlinkbundle"),
++      wc->GetTopLevelNativeWindow());
++}
++
++void ImporterImpl::FileSelected(const ui::SelectedFileInfo& file, int index) {
++  select_file_dialog_.reset();
++  base::FilePath bundle_path = file.path();
++  std::string passphrase = std::move(pending_passphrase_);
++  ImportFromPickedFileCallback cb = std::move(pending_picker_callback_);
++  // Re-use the regular Import path now that we have a concrete file.
++  Import(bundle_path, passphrase, std::move(cb));
++}
++
++void ImporterImpl::FileSelectionCanceled() {
++  select_file_dialog_.reset();
++  pending_passphrase_.clear();
++  if (pending_picker_callback_) {
++    std::move(pending_picker_callback_)
++        .Run(mojom::ImportStatus::kIo, base::FilePath());
++  }
++}
++
++void ImporterImpl::OnProfileCreated(base::FilePath bundle_path,
++                                    std::string passphrase,
++                                    ImportCallback callback,
++                                    Profile* profile) {
++  if (!profile) {
++    std::move(callback).Run(mojom::ImportStatus::kProfileCreationFailed,
++                            base::FilePath());
++    return;
++  }
++  base::FilePath profile_path = profile->GetPath();
++  base::ThreadPool::PostTaskAndReplyWithResult(
++      FROM_HERE,
++      {base::MayBlock(), base::TaskPriority::USER_BLOCKING,
++       base::TaskShutdownBehavior::SKIP_ON_SHUTDOWN},
++      base::BindOnce(&RunImportOnWorker, std::move(bundle_path),
++                     std::move(passphrase), profile_path),
++      base::BindOnce(&ImporterImpl::OnImportFinished,
++                     weak_factory_.GetWeakPtr(), profile_path,
++                     std::move(callback)));
++}
++
++void ImporterImpl::OnImportFinished(base::FilePath profile_path,
++                                    ImportCallback callback,
++                                    ImportStatus status) {
++  if (status != ImportStatus::kOk) {
++    // Best-effort: remove the half-populated scratch profile dir so the
++    // user doesn't see an empty "Imported …" entry in the picker. We
++    // don't try to unregister the profile from `ProfileAttributesStorage`
++    // here (Chromium's profile-deletion machinery is expensive); the
++    // dir-only cleanup is enough for v1.
++    base::ThreadPool::PostTask(
++        FROM_HERE,
++        {base::MayBlock(), base::TaskPriority::BEST_EFFORT,
++         base::TaskShutdownBehavior::SKIP_ON_SHUTDOWN},
++        base::BindOnce(&DeleteProfileDirOnWorker, profile_path));
++    std::move(callback).Run(ToMojom(status), base::FilePath());
++    return;
++  }
++  std::move(callback).Run(mojom::ImportStatus::kOk, profile_path);
++}
++
++}  // namespace phlink::portability
+diff --git a/chrome/browser/phlink/portability/importer_impl.h b/chrome/browser/phlink/portability/importer_impl.h
+new file mode 100644
+index 0000000000000..ed82082afa800
+--- /dev/null
++++ b/chrome/browser/phlink/portability/importer_impl.h
+@@ -0,0 +1,79 @@
++// Copyright 2026 The phlink Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_PHLINK_PORTABILITY_IMPORTER_IMPL_H_
++#define CHROME_BROWSER_PHLINK_PORTABILITY_IMPORTER_IMPL_H_
++
++#include <string>
++
++#include "base/files/file_path.h"
++#include "base/memory/weak_ptr.h"
++#include "chrome/browser/phlink/portability/import_service.h"
++#include "chrome/browser/phlink/portability/portability.mojom.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "mojo/public/cpp/bindings/pending_receiver.h"
++#include "mojo/public/cpp/bindings/receiver.h"
++#include "ui/shell_dialogs/select_file_dialog.h"
++
++class Profile;
++
++namespace content {
++class WebContents;
++}  // namespace content
++
++namespace phlink::portability {
++
++// Browser-process implementation of `phlink.portability.mojom.Importer`,
++// backed by `ImportBundleToDir` + `ProfileManager::CreateMultiProfileAsync`.
++//
++// Per CONTEXT D-05: import always creates a *new* profile named
++// `Imported <ISO timestamp>`; the active profile is never modified.
++//
++// Lifetime: one instance per chrome://portability WebUI tab; bounded by
++// the mojo receiver pipe.
++class ImporterImpl : public mojom::Importer,
++                     public ui::SelectFileDialog::Listener,
++                     public content::WebContentsObserver {
++ public:
++  ImporterImpl(content::WebContents* web_contents,
++               mojo::PendingReceiver<mojom::Importer> receiver);
++  ImporterImpl(const ImporterImpl&) = delete;
++  ImporterImpl& operator=(const ImporterImpl&) = delete;
++  ~ImporterImpl() override;
++
++  // mojom::Importer:
++  void Import(const base::FilePath& path,
++              const std::string& passphrase,
++              ImportCallback callback) override;
++  void ImportFromPickedFile(const std::string& passphrase,
++                            ImportFromPickedFileCallback callback) override;
++
++  // ui::SelectFileDialog::Listener:
++  void FileSelected(const ui::SelectedFileInfo& file, int index) override;
++  void FileSelectionCanceled() override;
++
++ private:
++  // Step 1: ProfileManager has minted the new profile.
++  void OnProfileCreated(base::FilePath bundle_path,
++                        std::string passphrase,
++                        ImportCallback callback,
++                        Profile* profile);
++  // Step 2: Worker finished importing.
++  void OnImportFinished(base::FilePath profile_path,
++                        ImportCallback callback,
++                        ImportStatus status);
++
++  mojo::Receiver<mojom::Importer> receiver_;
++
++  // State for the in-flight ImportFromPickedFile round-trip.
++  scoped_refptr<ui::SelectFileDialog> select_file_dialog_;
++  ImportFromPickedFileCallback pending_picker_callback_;
++  std::string pending_passphrase_;
++
++  base::WeakPtrFactory<ImporterImpl> weak_factory_{this};
++};
++
++}  // namespace phlink::portability
++
++#endif  // CHROME_BROWSER_PHLINK_PORTABILITY_IMPORTER_IMPL_H_
+diff --git a/chrome/browser/phlink/portability/portability.mojom b/chrome/browser/phlink/portability/portability.mojom
+index 24e8d9b3c50d6..a3f63c426e384 100644
+--- a/chrome/browser/phlink/portability/portability.mojom
++++ b/chrome/browser/phlink/portability/portability.mojom
+@@ -51,3 +51,42 @@ interface Exporter {
+   ExportToPickedFile(string passphrase)
+       => (ExportStatus status, mojo_base.mojom.FilePath path);
+ };
++
++// Mirrors phlink::portability::ImportStatus in C++. See
++// docs/dev/profile-bundle-format.md §7 for the user-visible mapping.
++enum ImportStatus {
++  kOk,
++  kBadMagic,
++  kUnsupportedVersion,
++  kUnknownPrimitive,
++  kBadPassphrase,
++  kIntegrity,
++  kTruncated,
++  kIo,
++  // ProfileManager rejected the new profile (rare; out-of-disk, name
++  // collision, …). Distinct from kIo so the UI can offer a different
++  // remedy.
++  kProfileCreationFailed,
++};
++
++// Browser-side service driving a single `.phlinkbundle` import.
++//
++// Lifetime: created per WebUI binding. Cancelled on disconnect.
++//
++// Per CONTEXT D-05: import always creates a new profile named
++// `Imported <ISO timestamp>`; the active profile is never modified.
++interface Importer {
++  // Reads + decrypts `path` with `passphrase`, mints a fresh profile,
++  // and copies the bundle entries into it. On success replies with the
++  // new profile's directory path so the WebUI can offer a "switch"
++  // affordance.
++  Import(mojo_base.mojom.FilePath path, string passphrase)
++      => (ImportStatus status, mojo_base.mojom.FilePath new_profile_path);
++
++  // Convenience entry point for chrome://portability: opens the
++  // platform open-file dialog (anchored to the WebUI window), then
++  // runs the same import. On cancel replies with `kIo` and an empty
++  // path.
++  ImportFromPickedFile(string passphrase)
++      => (ImportStatus status, mojo_base.mojom.FilePath new_profile_path);
++};
+diff --git a/chrome/browser/resources/portability/app.html b/chrome/browser/resources/portability/app.html
+index 1467a3e7b43c0..304bbe9334f43 100644
+--- a/chrome/browser/resources/portability/app.html
++++ b/chrome/browser/resources/portability/app.html
+@@ -46,8 +46,28 @@
+     <p class="status muted" ?hidden="${!this.lastPath_}">${this.lastPath_}</p>
+   </section>
+ 
+-  <section class="card disabled">
++  <section class="card">
+     <h2>$i18n{importHeading}</h2>
+     <p class="muted">$i18n{importBlurb}</p>
++
++    <cr-input id="importPassphrase"
++              type="password"
++              label="$i18n{importPassphraseLabel}"
++              .value="${this.importPassphrase_}"
++              @value-changed="${this.onImportPassphraseValueChanged_}"
++              ?disabled="${this.importBusy_}">
++    </cr-input>
++
++    <div class="actions">
++      <cr-button class="action-button"
++                 ?disabled="${!this.canImport_()}"
++                 @click="${this.onImportClick_}">
++        $i18n{importButton}
++      </cr-button>
++    </div>
++
++    <p class="status" ?hidden="${!this.importStatus_}">${this.importStatus_}</p>
++    <p class="status muted"
++       ?hidden="${!this.importedProfilePath_}">${this.importedProfilePath_}</p>
+   </section>
+ </div>
+diff --git a/chrome/browser/resources/portability/app.ts b/chrome/browser/resources/portability/app.ts
+index 4652e5c42464f..34a67bbc9b4dd 100644
+--- a/chrome/browser/resources/portability/app.ts
++++ b/chrome/browser/resources/portability/app.ts
+@@ -9,8 +9,8 @@ import {CrLitElement} from 'chrome://resources/lit/v3_0/lit.rollup.js';
+ 
+ import {getCss} from './app.css.js';
+ import {getHtml} from './app.html.js';
+-import {getExporter} from './browser_proxy.js';
+-import {ExportStatus} from './portability.mojom-webui.js';
++import {getExporter, getImporter} from './browser_proxy.js';
++import {ExportStatus, ImportStatus} from './portability.mojom-webui.js';
+ 
+ export class AppElement extends CrLitElement {
+   static get is() {
+@@ -32,6 +32,10 @@ export class AppElement extends CrLitElement {
+       busy_: {type: Boolean, reflect: true},
+       lastStatus_: {type: String},
+       lastPath_: {type: String},
++      importPassphrase_: {type: String},
++      importBusy_: {type: Boolean, reflect: true},
++      importStatus_: {type: String},
++      importedProfilePath_: {type: String},
+     };
+   }
+ 
+@@ -40,6 +44,10 @@ export class AppElement extends CrLitElement {
+   protected accessor busy_: boolean = false;
+   protected accessor lastStatus_: string = '';
+   protected accessor lastPath_: string = '';
++  protected accessor importPassphrase_: string = '';
++  protected accessor importBusy_: boolean = false;
++  protected accessor importStatus_: string = '';
++  protected accessor importedProfilePath_: string = '';
+ 
+   protected onPassphraseValueChanged_(e: CustomEvent<{value: string}>) {
+     this.passphrase_ = e.detail.value;
+@@ -87,6 +95,58 @@ export class AppElement extends CrLitElement {
+         return 'Unknown error.';
+     }
+   }
++
++  protected onImportPassphraseValueChanged_(
++      e: CustomEvent<{value: string}>) {
++    this.importPassphrase_ = e.detail.value;
++  }
++
++  protected canImport_(): boolean {
++    return !this.importBusy_ && this.importPassphrase_.length > 0;
++  }
++
++  protected async onImportClick_() {
++    if (!this.canImport_()) {
++      return;
++    }
++    this.importBusy_ = true;
++    this.importStatus_ = '';
++    this.importedProfilePath_ = '';
++    try {
++      const {status, newProfilePath} =
++          await getImporter().importFromPickedFile(this.importPassphrase_);
++      this.importStatus_ = this.importStatusToString_(status);
++      this.importedProfilePath_ = newProfilePath.path || '';
++    } finally {
++      this.importBusy_ = false;
++      this.importPassphrase_ = '';
++    }
++  }
++
++  private importStatusToString_(status: ImportStatus): string {
++    switch (status) {
++      case ImportStatus.kOk:
++        return 'Import complete. New profile created.';
++      case ImportStatus.kBadMagic:
++        return 'File is not a phlink bundle.';
++      case ImportStatus.kUnsupportedVersion:
++        return 'Bundle uses an unsupported format version.';
++      case ImportStatus.kUnknownPrimitive:
++        return 'Bundle uses an unrecognized cryptographic primitive.';
++      case ImportStatus.kBadPassphrase:
++        return 'Passphrase rejected.';
++      case ImportStatus.kIntegrity:
++        return 'Bundle failed integrity check.';
++      case ImportStatus.kTruncated:
++        return 'Bundle is truncated or malformed.';
++      case ImportStatus.kIo:
++        return 'Cancelled or filesystem read failed.';
++      case ImportStatus.kProfileCreationFailed:
++        return 'phlink could not create a new profile for the import.';
++      default:
++        return 'Unknown error.';
++    }
++  }
+ }
+ 
+ declare global {
+diff --git a/chrome/browser/resources/portability/browser_proxy.ts b/chrome/browser/resources/portability/browser_proxy.ts
+index b25a9632d3b84..f88f3d612b450 100644
+--- a/chrome/browser/resources/portability/browser_proxy.ts
++++ b/chrome/browser/resources/portability/browser_proxy.ts
+@@ -2,10 +2,11 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
+-import type {ExporterRemote} from './portability.mojom-webui.js';
+-import {Exporter} from './portability.mojom-webui.js';
++import type {ExporterRemote, ImporterRemote} from './portability.mojom-webui.js';
++import {Exporter, Importer} from './portability.mojom-webui.js';
+ 
+ let exporter: ExporterRemote|null = null;
++let importer: ImporterRemote|null = null;
+ 
+ export function getExporter(): ExporterRemote {
+   if (!exporter) {
+@@ -13,3 +14,10 @@ export function getExporter(): ExporterRemote {
+   }
+   return exporter;
+ }
++
++export function getImporter(): ImporterRemote {
++  if (!importer) {
++    importer = Importer.getRemote();
++  }
++  return importer;
++}
+diff --git a/chrome/browser/ui/webui/portability/BUILD.gn b/chrome/browser/ui/webui/portability/BUILD.gn
+index 1f347f58fc1bb..8ecb17d0d91f5 100644
+--- a/chrome/browser/ui/webui/portability/BUILD.gn
++++ b/chrome/browser/ui/webui/portability/BUILD.gn
+@@ -9,6 +9,7 @@ source_set("portability") {
+   ]
+   deps = [
+     "//chrome/browser/phlink/portability:exporter_impl",
++    "//chrome/browser/phlink/portability:importer_impl",
+     "//chrome/browser/phlink/portability:portability_mojom",
+     "//chrome/browser/profiles:profile",
+     "//chrome/browser/resources/portability:resources",
+diff --git a/chrome/browser/ui/webui/portability/portability_ui.cc b/chrome/browser/ui/webui/portability/portability_ui.cc
+index bba78bc46dc90..07e0b3222313e 100644
+--- a/chrome/browser/ui/webui/portability/portability_ui.cc
++++ b/chrome/browser/ui/webui/portability/portability_ui.cc
+@@ -5,6 +5,7 @@
+ #include "chrome/browser/ui/webui/portability/portability_ui.h"
+ 
+ #include "chrome/browser/phlink/portability/exporter_impl.h"
++#include "chrome/browser/phlink/portability/importer_impl.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/grit/portability_resources.h"
+ #include "chrome/grit/portability_resources_map.h"
+@@ -37,7 +38,23 @@ PortabilityUI::PortabilityUI(content::WebUI* web_ui)
+       {"confirmLabel", "Confirm passphrase"},
+       {"exportButton", "Save bundle…"},
+       {"importHeading", "Import"},
+-      {"importBlurb", "Import support is coming in a follow-up release."},
++      {"importBlurb",
++       "Restore a previously exported bundle into a brand-new phlink profile. "
++       "Your active profile is never modified."},
++      {"importPassphraseLabel", "Bundle passphrase"},
++      {"importButton", "Pick bundle…"},
++      {"importStatusOk", "Import complete. New profile created."},
++      {"importStatusBadPassphrase", "Passphrase rejected."},
++      {"importStatusIntegrity", "Bundle failed integrity check."},
++      {"importStatusTruncated", "Bundle is truncated or malformed."},
++      {"importStatusUnsupported",
++       "Bundle uses an unsupported format version."},
++      {"importStatusBadMagic", "File is not a phlink bundle."},
++      {"importStatusUnknownPrimitive",
++       "Bundle uses an unrecognized cryptographic primitive."},
++      {"importStatusIo", "Cancelled or filesystem read failed."},
++      {"importStatusProfileFailed",
++       "phlink could not create a new profile for the import."},
+   };
+   for (const auto& s : kStrings) {
+     source->AddString(s.name, s.value);
+@@ -55,4 +72,10 @@ void PortabilityUI::BindInterface(
+       web_ui()->GetWebContents(), std::move(receiver));
+ }
+ 
++void PortabilityUI::BindInterface(
++    mojo::PendingReceiver<phlink::portability::mojom::Importer> receiver) {
++  importer_ = std::make_unique<phlink::portability::ImporterImpl>(
++      web_ui()->GetWebContents(), std::move(receiver));
++}
++
+ WEB_UI_CONTROLLER_TYPE_IMPL(PortabilityUI)
+diff --git a/chrome/browser/ui/webui/portability/portability_ui.h b/chrome/browser/ui/webui/portability/portability_ui.h
+index 1316a16807eda..979822c606944 100644
+--- a/chrome/browser/ui/webui/portability/portability_ui.h
++++ b/chrome/browser/ui/webui/portability/portability_ui.h
+@@ -15,6 +15,7 @@
+ 
+ namespace phlink::portability {
+ class ExporterImpl;
++class ImporterImpl;
+ }  // namespace phlink::portability
+ 
+ class PortabilityUI;
+@@ -36,9 +37,12 @@ class PortabilityUI : public ui::MojoWebUIController {
+ 
+   void BindInterface(
+       mojo::PendingReceiver<phlink::portability::mojom::Exporter> receiver);
++  void BindInterface(
++      mojo::PendingReceiver<phlink::portability::mojom::Importer> receiver);
+ 
+  private:
+   std::unique_ptr<phlink::portability::ExporterImpl> exporter_;
++  std::unique_ptr<phlink::portability::ImporterImpl> importer_;
+ 
+   WEB_UI_CONTROLLER_TYPE_DECL();
+ };
+-- 
+2.50.1 (Apple Git-155)
+
