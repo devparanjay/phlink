@@ -73,6 +73,20 @@ jobs:
           pip install websocket-client
           python tests/branding-audit/runtime-audit.py
 
+      - name: broken-link check (advisory, non-blocking)
+        continue-on-error: true
+        run: |
+          curl -sSLf https://github.com/lycheeverse/lychee/releases/download/lychee-v0.15.1/lychee-x86_64-unknown-linux-gnu.tar.gz \
+            | tar -xz lychee
+          chmod +x lychee
+          ./lychee \
+            --offline \
+            --include-fragments \
+            --no-progress \
+            "docs/**/*.md" "README.md" "CONTRIBUTING.md" \
+            2>&1 | tee lychee-report.txt || true
+          echo "--- lychee done (advisory only, non-blocking) ---"
+
   lint-macos:
     name: lint (macos-14)
     runs-on: macos-14
