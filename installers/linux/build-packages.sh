@@ -22,6 +22,15 @@ fi
 OUT_DIR="$1"
 VERSION="$2"
 
+if [[ ! -x "${OUT_DIR}/phlink" ]]; then
+  echo "phlink binary not found at ${OUT_DIR}/phlink" >&2
+  exit 1
+fi
+if [[ ! -x "${OUT_DIR}/phlink_update_helper" ]]; then
+  echo "phlink_update_helper not found at ${OUT_DIR}/phlink_update_helper" >&2
+  exit 1
+fi
+
 if ! command -v fpm >/dev/null 2>&1; then
   echo "fpm not in PATH; install via 'gem install fpm'" >&2
   exit 1
@@ -31,17 +40,29 @@ STAGE="$(mktemp -d -t phlink-pkg.XXXXXX)"
 trap 'rm -rf "${STAGE}"' EXIT
 mkdir -p dist
 
-mkdir -p "${STAGE}/usr/bin" "${STAGE}/usr/share/applications" \
-         "${STAGE}/usr/share/icons/hicolor/256x256/apps" \
-         "${STAGE}/usr/share/phlink"
+mkdir -p "${STAGE}/opt/phlink" "${STAGE}/usr/bin" \
+         "${STAGE}/usr/share/applications" \
+         "${STAGE}/usr/share/icons/hicolor/256x256/apps"
 
-cp "${OUT_DIR}/phlink" "${STAGE}/usr/bin/phlink"
-[[ -x "${OUT_DIR}/phlink_update_helper" ]] && \
-  cp "${OUT_DIR}/phlink_update_helper" "${STAGE}/usr/bin/phlink_update_helper"
+cp -a "${OUT_DIR}/." "${STAGE}/opt/phlink/"
+ln -s /opt/phlink/phlink "${STAGE}/usr/bin/phlink"
+ln -s /opt/phlink/phlink_update_helper \
+  "${STAGE}/usr/bin/phlink_update_helper"
 
 ICON_SRC="$(dirname "$0")/../../branding/phlink-256.png"
 if [[ -f "${ICON_SRC}" ]]; then
   cp "${ICON_SRC}" "${STAGE}/usr/share/icons/hicolor/256x256/apps/phlink.png"
+fi
+
+RELEASE_GPG="${PHLINK_RELEASE_GPG:-$(dirname "$0")/../../branding/release.gpg}"
+if [[ -f "${RELEASE_GPG}" ]]; then
+  mkdir -p "${STAGE}/usr/share/phlink"
+  cp "${RELEASE_GPG}" "${STAGE}/usr/share/phlink/release.gpg"
+elif [[ "${PHLINK_ALLOW_MISSING_RELEASE_GPG:-0}" == "1" ]]; then
+  echo "warning: omitting release.gpg for local smoke build" >&2
+else
+  echo "release.gpg not found; set PHLINK_RELEASE_GPG or PHLINK_ALLOW_MISSING_RELEASE_GPG=1 for local smoke builds." >&2
+  exit 1
 fi
 
 cat > "${STAGE}/usr/share/applications/phlink.desktop" <<'EOF'

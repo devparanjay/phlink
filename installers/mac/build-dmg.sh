@@ -14,8 +14,8 @@
 #                        ad-hoc signing (`-`) which produces an unsigned-for-distribution
 #                        dmg suitable only for local smoke tests.
 #
-# The output is `dist/phlink-<version>-mac-arm64.dmg`. This script
-# does NOT notarize -- notarization is a separate CI step (10-08).
+# The output is `dist/phlink-<version>-mac-arm64.dmg`. Release CI notarizes
+# and verifies the generated dmg and update zip before upload.
 
 set -euo pipefail
 
@@ -30,6 +30,7 @@ IDENTITY="${3:--}"
 
 APP="${OUT_DIR}/phlink.app"
 HELPER="${OUT_DIR}/phlink_update_helper"
+TRUST_ROOT="${OUT_DIR}/resources/phlink/keys/root.json"
 DIST_DIR="dist"
 DMG_PATH="${DIST_DIR}/phlink-${VERSION}-mac-arm64.dmg"
 
@@ -41,6 +42,10 @@ if [[ ! -x "${HELPER}" ]]; then
   echo "phlink_update_helper not found at ${HELPER}; run autoninja chrome/browser/phlink/updater:update_helpers." >&2
   exit 1
 fi
+if [[ ! -f "${TRUST_ROOT}" ]]; then
+  echo "updater trust root not found at ${TRUST_ROOT}; set phlink_updater_root_json for release builds." >&2
+  exit 1
+fi
 
 STAGE="$(mktemp -d -t phlink-dmg.XXXXXX)"
 trap 'rm -rf "${STAGE}"' EXIT
@@ -49,13 +54,21 @@ mkdir -p "${DIST_DIR}"
 cp -R "${APP}" "${STAGE}/"
 mkdir -p "${STAGE}/phlink.app/Contents/Helpers"
 cp "${HELPER}" "${STAGE}/phlink.app/Contents/Helpers/phlink_update_helper"
+mkdir -p "${STAGE}/phlink.app/Contents/Resources/phlink/keys"
+cp "${TRUST_ROOT}" \
+  "${STAGE}/phlink.app/Contents/Resources/phlink/keys/root.json"
 ln -s /Applications "${STAGE}/Applications"
 
 # Re-sign the bundle so the embedded helper is covered.
-codesign --force --deep --sign "${IDENTITY}" --options runtime \
-  --entitlements /dev/null \
-  "${STAGE}/phlink.app" 2>/dev/null || \
+if [[ "${IDENTITY}" == "-" ]]; then
   codesign --force --deep --sign "${IDENTITY}" "${STAGE}/phlink.app"
+else
+  codesign --force --deep --sign "${IDENTITY}" --options runtime \
+    "${STAGE}/phlink.app"
+fi
+
+ditto -c -k --keepParent "${STAGE}/phlink.app" \
+  "${DIST_DIR}/phlink-${VERSION}-mac-arm64-update.zip"
 
 rm -f "${DMG_PATH}"
 hdiutil create \

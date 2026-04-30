@@ -13,8 +13,8 @@
 #                                   <timestamp-key> <gpg-secret-key>
 #
 # <artifacts-dir>     -- directory containing the installers to sign
-#                        (e.g. phlink-<v>-mac-arm64.dmg, .AppImage,
-#                         .deb, .rpm, .msi).
+#                        (installers plus updater payloads for the same
+#                         version).
 # <version>           -- release version, e.g. 0.1.0.
 # <targets-key>       -- path to the Ed25519 targets.key (PEM).
 # <snapshot-key>      -- path to the Ed25519 snapshot.key (PEM).
@@ -47,6 +47,46 @@ fi
 for k in "${TARGETS_KEY}" "${SNAPSHOT_KEY}" "${TIMESTAMP_KEY}" \
                  "${GPG_SECRET}"; do
     if [[ ! -f "$k" ]]; then echo "missing key: $k" >&2; exit 1; fi
+done
+
+expected_artifacts=(
+    "phlink-${VERSION}-mac-arm64.dmg"
+    "phlink-${VERSION}-mac-arm64-update.zip"
+    "phlink-${VERSION}-linux-x86_64.AppImage"
+    "phlink-${VERSION}-linux-x86_64-update"
+    "phlink_${VERSION}_amd64.deb"
+    "phlink-${VERSION}-1.x86_64.rpm"
+    "phlink-${VERSION}-win-x64.msi"
+    "phlink-${VERSION}-win-x64-update.exe"
+)
+
+for name in "${expected_artifacts[@]}"; do
+    if [[ ! -f "${ARTIFACTS}/${name}" ]]; then
+        echo "missing expected release artifact: ${name}" >&2
+        exit 1
+    fi
+done
+
+shopt -s nullglob
+release_files=("${ARTIFACTS}"/*)
+shopt -u nullglob
+for path in "${release_files[@]}"; do
+    [[ -f "${path}" ]] || continue
+    name="$(basename "${path}")"
+    case "${name}" in
+        targets.json|snapshot.json|timestamp.json|*.sig) continue ;;
+    esac
+    allowed=false
+    for expected in "${expected_artifacts[@]}"; do
+        if [[ "${name}" == "${expected}" ]]; then
+            allowed=true
+            break
+        fi
+    done
+    if [[ "${allowed}" != true ]]; then
+        echo "unexpected release artifact: ${name}" >&2
+        exit 1
+    fi
 done
 
 # 1. Detached gpg signatures for linux artifacts.
@@ -126,15 +166,47 @@ def meta_for(path):
         "hashes": {"sha256": sha256_file(path)},
     }
 
-targets = {}
-for name in sorted(os.listdir(artifacts_dir)):
-    if any(name.endswith(s) for s in (".dmg", ".AppImage", ".deb",
-                                      ".rpm", ".msi", ".exe", ".zip")):
-        full = os.path.join(artifacts_dir, name)
-        targets[name] = {
-            "length": os.path.getsize(full),
-            "hashes": {"sha256": sha256_file(full)},
+expected_names = [
+    f"phlink-{version}-mac-arm64-update.zip",
+    f"phlink-{version}-linux-x86_64-update",
+    f"phlink-{version}-win-x64-update.exe",
+]
+
+def custom_for(name):
+    if name.endswith("-mac-arm64-update.zip"):
+        return {
+            "version": version,
+            "platform": "mac",
+            "arch": "arm64",
+            "channel": "stable",
+            "format": "app-zip",
         }
+    if name.endswith("-linux-x86_64-update"):
+        return {
+            "version": version,
+            "platform": "linux",
+            "arch": "x86_64",
+            "channel": "stable",
+            "format": "binary",
+        }
+    if name.endswith("-win-x64-update.exe"):
+        return {
+            "version": version,
+            "platform": "win",
+            "arch": "x64",
+            "channel": "stable",
+            "format": "exe",
+        }
+    raise ValueError(f"unclassified update target: {name}")
+
+targets = {}
+for name in expected_names:
+    full = os.path.join(artifacts_dir, name)
+    targets[name] = {
+        "length": os.path.getsize(full),
+        "hashes": {"sha256": sha256_file(full)},
+        "custom": custom_for(name),
+    }
 
 role_version = int(now.timestamp())
 targets_signed = {

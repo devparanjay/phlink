@@ -24,6 +24,7 @@ scripts/release/keygen.sh ~/phlink-keys
 This produces:
 
 - `root.{key,pub}` — Ed25519, used to sign `root.json`.
+- `root.json` — signed TUF root metadata authorizing the initial role keys.
 - `targets.{key,pub}` — Ed25519, used to sign `targets.json`.
 - `snapshot.{key,pub}` — Ed25519, used to sign `snapshot.json`.
 - `timestamp.{key,pub}` — Ed25519, used to sign `timestamp.json`.
@@ -41,14 +42,17 @@ This produces:
    These keys are hot because release cadence requires them; mitigation is
    short metadata expiry (7 days for timestamp, 30 for snapshot, 90 for
    targets; see `sign-release.sh`).
-4. Bundle `release.gpg` into the linux installers
-   (`installers/linux/build-packages.sh` reads it from
-   `branding/release.gpg`).
-5. Replace the dev TUF root in
-   `chromium-src/src/chrome/browser/phlink/updater/keys/dev_root.json`
-   with a production `root.json` signed by `root.key`. This is a
-   chromium-side patch (not yet authored; deferred to v1.0 alpha
-   tag).
+4. Upload `release.gpg` to the package workflow as `PHLINK_GPG_PUBLIC`.
+   Local packaging can also pass `PHLINK_RELEASE_GPG=/path/to/release.gpg`;
+   omission is allowed only with `PHLINK_ALLOW_MISSING_RELEASE_GPG=1` for
+   smoke builds.
+5. Set `phlink_updater_dev_root=false` and
+   `phlink_updater_root_json="/path/to/root.json"` for release builds.
+   The build copies that signed root metadata to
+   `resources/phlink/keys/root.json`; macOS packaging embeds the same file
+   under `Contents/Resources/phlink/keys/root.json`. Record the SHA-256 of
+   this production `root.json`; release signing requires it as
+   `expected_updater_root_sha256`.
 
 ## Per-release signing (CI)
 
@@ -76,17 +80,29 @@ role key rotation.
 
 The checked-in CI scaffold is split across two manual workflows:
 
-- `package-installers.yml` consumes prebuilt Chromium outputs and creates
-   unsigned/signable installer artifacts.
-- `release-sign.yml` runs inside the `release-signing` GitHub environment and
-   signs TUF targets metadata plus Linux detached signatures using
+- `package-installers.yml` consumes prebuilt Chromium outputs only after
+   validating the Chromium build run's workflow path, ref, commit SHA, and
+   repository. It signs and verifies macOS and Windows artifacts, validates
+   `phlink_updater_dev_root=false`, records the compiled
+   `phlink_product_version`, records the packaged updater root SHA-256, and
+   uploads per-platform provenance manifests with artifact SHA-256 digests.
+- `release-sign.yml` runs inside the `release-signing` GitHub environment. It
+   validates the package workflow run, checks each provenance manifest and
+   macOS/Windows platform-signing gate, verifies the Linux package public key
+   hash matches `PHLINK_GPG_PUBLIC`, verifies the updater root hash matches
+   `expected_updater_root_sha256`, and only then materializes
    `PHLINK_TARGETS_KEY`, `PHLINK_SNAPSHOT_KEY`, `PHLINK_TIMESTAMP_KEY`, and
-   `PHLINK_GPG_SECRET`.
+   `PHLINK_GPG_SECRET`. After signing, it verifies Linux detached signatures
+   with the same public key before upload.
 
 Authenticode (Windows) and Developer ID (macOS) signing are NOT performed by
 `scripts/release/sign-release.sh`. They run inside platform-specific CI runners
-with hardware-backed credentials before `release-sign.yml` ingests the final
-artifacts.
+with protected CI credentials before `release-sign.yml` ingests the final
+artifacts. Required CI credentials are `PHLINK_MACOS_DEVELOPER_ID_P12`,
+`PHLINK_MACOS_DEVELOPER_ID_PASSWORD`, `PHLINK_MACOS_KEYCHAIN_PASSWORD`,
+`PHLINK_APPLE_ID`, `PHLINK_APPLE_APP_PASSWORD`, `PHLINK_APPLE_TEAM_ID`,
+`PHLINK_WINDOWS_SIGNING_CERT_PFX`, `PHLINK_WINDOWS_SIGNING_CERT_PASSWORD`,
+and `PHLINK_GPG_PUBLIC`.
 
 ## Key rotation
 

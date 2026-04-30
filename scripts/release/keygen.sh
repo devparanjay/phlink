@@ -22,7 +22,7 @@
 # This script is run ONCE per release-key-rotation. Output:
 #   <output-dir>/root.key            (Ed25519 private)
 #   <output-dir>/root.pub            (Ed25519 public)
-#   <output-dir>/root.json           (TUF root metadata, unsigned)
+#   <output-dir>/root.json           (TUF root metadata, signed)
 #   <output-dir>/targets.key
 #   <output-dir>/targets.pub
 #   <output-dir>/snapshot.key
@@ -71,6 +71,78 @@ generate_ed25519 snapshot
 echo "Generating TUF timestamp key..."
 generate_ed25519 timestamp
 
+echo "Generating signed TUF root metadata..."
+python3 - "${OUT}" <<'PY'
+import datetime as dt
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import tempfile
+
+out = sys.argv[1]
+now = dt.datetime.now(dt.timezone.utc)
+
+def canonical(data):
+  return json.dumps(data, sort_keys=True, separators=(",", ":")).encode()
+
+def public_der(role):
+  return subprocess.run(
+    [
+      "openssl", "pkey", "-pubin", "-in", os.path.join(out, f"{role}.pub"),
+      "-pubout", "-outform", "DER",
+    ],
+    capture_output=True, check=True,
+  ).stdout
+
+def key_entry(role):
+  der = public_der(role)
+  return hashlib.sha256(der).hexdigest(), {
+    "keytype": "ed25519",
+    "scheme": "ed25519",
+    "keyval": {"public": der[-32:].hex()},
+  }
+
+keys_by_role = {}
+keys = {}
+for role in ("root", "targets", "snapshot", "timestamp"):
+  keyid, key = key_entry(role)
+  keys_by_role[role] = keyid
+  keys[keyid] = key
+
+signed = {
+  "_type": "root",
+  "spec_version": "1.0.32",
+  "version": 1,
+  "expires": (now + dt.timedelta(days=3650)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+  "keys": keys,
+  "roles": {
+    role: {"keyids": [keyid], "threshold": 1}
+    for role, keyid in keys_by_role.items()
+  },
+}
+
+with tempfile.NamedTemporaryFile() as message:
+  message.write(canonical(signed))
+  message.flush()
+  sig = subprocess.run(
+    [
+      "openssl", "pkeyutl", "-sign", "-inkey",
+      os.path.join(out, "root.key"), "-rawin", "-in", message.name,
+    ],
+    capture_output=True, check=True,
+  ).stdout
+
+root = {
+  "signed": signed,
+  "signatures": [{"keyid": keys_by_role["root"], "sig": sig.hex()}],
+}
+with open(os.path.join(out, "root.json"), "w") as f:
+  json.dump(root, f, sort_keys=True, separators=(",", ":"))
+PY
+chmod 644 "${OUT}/root.json"
+
 echo "Generating gpg release key..."
 GNUPGHOME="$(mktemp -d -t phlink-gpg.XXXXXX)"
 export GNUPGHOME
@@ -102,7 +174,8 @@ Done.
 
 Generated:
   ${OUT}/root.key            -> AIR-GAP THIS, then shred local copy.
-  ${OUT}/root.pub            -> bake into chrome/browser/phlink/updater/keys/dev_root.json
+  ${OUT}/root.pub            -> audit/verification copy of the root public key.
+  ${OUT}/root.json           -> pass as phlink_updater_root_json for release builds.
   ${OUT}/targets.key         -> upload to CI secret store (GitHub Actions secret).
   ${OUT}/targets.pub
   ${OUT}/snapshot.key        -> upload to CI secret store (GitHub Actions secret).

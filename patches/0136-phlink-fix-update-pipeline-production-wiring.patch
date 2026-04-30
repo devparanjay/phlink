@@ -1,0 +1,1296 @@
+From f49efa18c8f5a95fe34025eccab9910e79d349b3 Mon Sep 17 00:00:00 2001
+From: phlink <phlink@local>
+Date: Thu, 30 Apr 2026 03:21:24 +0530
+Subject: [PATCH] phlink: fix update pipeline production wiring
+
+---
+ chrome/browser/phlink/updater/BUILD.gn        |  23 ++-
+ .../browser/phlink/updater/metadata_client.cc |  90 ++++++++++-
+ .../browser/phlink/updater/metadata_client.h  |  30 ++--
+ .../updater/metadata_client_unittest.cc       | 114 ++++++++++++--
+ .../updater/metadata_fetcher_unittest.cc      |  17 +--
+ .../phlink/updater/metadata_test_helpers.cc   |  18 ++-
+ .../phlink/updater/metadata_test_helpers.h    |   3 +-
+ .../browser/phlink/updater/payload_fetcher.cc |  34 ++++-
+ .../browser/phlink/updater/payload_fetcher.h  |   1 +
+ .../updater/payload_fetcher_unittest.cc       |  38 ++++-
+ .../browser/phlink/updater/phlink_updater.gni |  20 ++-
+ .../phlink/updater/update_check_pipeline.cc   |  39 +++--
+ .../phlink/updater/update_check_pipeline.h    |  24 +--
+ .../updater/update_check_pipeline_unittest.cc | 138 +++++++++++++----
+ .../phlink/updater/updater_service_factory.cc | 140 ++++++++++++++++--
+ 15 files changed, 590 insertions(+), 139 deletions(-)
+
+diff --git a/chrome/browser/phlink/updater/BUILD.gn b/chrome/browser/phlink/updater/BUILD.gn
+index 15589421babb1..e6dd2e2937231 100644
+--- a/chrome/browser/phlink/updater/BUILD.gn
++++ b/chrome/browser/phlink/updater/BUILD.gn
+@@ -5,6 +5,9 @@
+ import("//chrome/browser/phlink/updater/phlink_updater.gni")
+ import("//testing/test.gni")
+
++assert(phlink_updater_dev_root || phlink_updater_root_json != "",
++       "Set phlink_updater_root_json when phlink_updater_dev_root=false.")
++
+ # Canonical-JSON encoder used both by the runtime client and unit tests.
+ # OLPC / TUF flavour: sorted keys, no whitespace, integer numbers only.
+ source_set("canonical_json") {
+@@ -72,14 +75,19 @@ source_set("service_factory") {
+     "updater_service_factory.cc",
+     "updater_service_factory.h",
+   ]
++  defines = [ "PHLINK_PRODUCT_VERSION=\"$phlink_product_version\"" ]
+   deps = [
+     ":service",
++    ":update_check_pipeline",
+     "//base",
+     "//chrome/browser:browser_process",
+     "//chrome/browser/profiles:profile",
+     "//components/keyed_service/content",
+     "//components/prefs",
++    "//content/public/browser",
++    "//services/network/public/cpp",
+   ]
++  data_deps = [ ":root_json" ]
+ }
+
+ # MetadataFetcher: drives a TUF metadata fetch sequence
+@@ -170,13 +178,16 @@ source_set("test_helpers") {
+   ]
+ }
+
+-# Dev-only trust root. `phlink_updater_dev_root` (in phlink_updater.gni)
+-# selects this. Production builds will replace it with `prod_root.json` in
+-# Phase 10 plan 10-08.
+-if (phlink_updater_dev_root) {
+-  copy("dev_root_json") {
++# Trust root copied to the stable runtime path consumed by the updater.
++if (phlink_updater_root_json != "") {
++  copy("root_json") {
++    sources = [ phlink_updater_root_json ]
++    outputs = [ "$root_out_dir/resources/phlink/keys/root.json" ]
++  }
++} else if (phlink_updater_dev_root) {
++  copy("root_json") {
+     sources = [ "keys/dev_root.json" ]
+-    outputs = [ "$root_out_dir/phlink/keys/{{source_file_part}}" ]
++    outputs = [ "$root_out_dir/resources/phlink/keys/root.json" ]
+   }
+ }
+
+diff --git a/chrome/browser/phlink/updater/metadata_client.cc b/chrome/browser/phlink/updater/metadata_client.cc
+index 0f3dae9630657..3d2ea00f023c5 100644
+--- a/chrome/browser/phlink/updater/metadata_client.cc
++++ b/chrome/browser/phlink/updater/metadata_client.cc
+@@ -11,7 +11,9 @@
+ #include "base/json/json_reader.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/strings/string_number_conversions.h"
++#include "base/strings/string_split.h"
+ #include "base/strings/string_util.h"
++#include "base/version.h"
+ #include "chrome/browser/phlink/updater/canonical_json.h"
+ #include "crypto/keypair.h"
+ #include "crypto/sign.h"
+@@ -53,6 +55,37 @@ bool ParseUint64(const base::Value& v, uint64_t* out) {
+   return true;
+ }
+
++void FillTargetFieldsFromName(std::string_view name, TargetMeta* target) {
++  std::string base_name(name);
++  constexpr std::string_view kSuffixes[] = {
++      ".AppImage", ".deb", ".dmg", ".exe", ".rpm", ".zip", "-update"};
++  bool stripped = true;
++  while (stripped) {
++    stripped = false;
++    for (std::string_view suffix : kSuffixes) {
++      if (base::EndsWith(base_name, suffix, base::CompareCase::SENSITIVE)) {
++        base_name.resize(base_name.size() - suffix.size());
++        stripped = true;
++        break;
++      }
++    }
++  }
++  std::vector<std::string> parts = base::SplitString(
++      base_name, "-", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
++  if (parts.size() < 4 || parts[0] != "phlink") {
++    return;
++  }
++  if (target->version.empty()) {
++    target->version = parts[1];
++  }
++  if (target->platform.empty()) {
++    target->platform = parts[2];
++  }
++  if (target->arch.empty()) {
++    target->arch = parts[3];
++  }
++}
++
+ }  // namespace
+
+ TufClient::TufClient() = default;
+@@ -73,7 +106,6 @@ TufClient::RoleSpec& TufClient::RoleSpec::operator=(const RoleSpec&) = default;
+ TufClient::RoleSpec& TufClient::RoleSpec::operator=(RoleSpec&&) = default;
+ TufClient::RoleSpec::~RoleSpec() = default;
+
+-
+ // Parse an outer `{ "signed": ..., "signatures": [...] }` envelope into its
+ // two halves. Returns kBadJson on any structural problem.
+ namespace {
+@@ -169,8 +201,7 @@ TufError TufClient::VerifyRoleSignedBlock(const std::string& role_name,
+     }
+     auto pub = crypto::keypair::PublicKey::FromEd25519PublicKey(
+         key_it->second.public_key);
+-    if (!crypto::sign::Verify(crypto::sign::ED25519, pub, message,
+-                              sig_bytes)) {
++    if (!crypto::sign::Verify(crypto::sign::ED25519, pub, message, sig_bytes)) {
+       return TufError::kBadSignature;
+     }
+     valid_keyids.insert(*keyid);
+@@ -415,14 +446,26 @@ TufError TufClient::IngestSnapshot(base::span<const uint8_t> json_bytes) {
+     return TufError::kMissingField;
+   }
+   const base::Value* tgt_version_v = tgt_meta->Find("version");
+-  if (!tgt_version_v) {
++  std::optional<int> tgt_length = tgt_meta->FindInt("length");
++  const base::DictValue* tgt_hashes = tgt_meta->FindDict("hashes");
++  if (!tgt_version_v || !tgt_length || *tgt_length < 0 || !tgt_hashes) {
+     return TufError::kMissingField;
+   }
+   uint64_t tv = 0;
+   if (!ParseUint64(*tgt_version_v, &tv)) {
+     return TufError::kBadJson;
+   }
++  const std::string* sha256_hex = tgt_hashes->FindString("sha256");
++  if (!sha256_hex) {
++    return TufError::kMissingField;
++  }
++  std::array<uint8_t, kSha256Len> sha{};
++  if (!DecodeHexFixed(*sha256_hex, sha)) {
++    return TufError::kBadJson;
++  }
+   expected_targets_version_ = tv;
++  expected_targets_length_ = static_cast<uint64_t>(*tgt_length);
++  expected_targets_sha256_ = sha;
+   targets_pin_set_ = true;
+   return TufError::kOk;
+ }
+@@ -431,6 +474,14 @@ TufError TufClient::IngestTargets(base::span<const uint8_t> json_bytes) {
+   if (!targets_pin_set_) {
+     return TufError::kVersionMismatch;
+   }
++  if (json_bytes.size() != expected_targets_length_) {
++    return TufError::kLengthMismatch;
++  }
++  std::array<uint8_t, kSha256Len> actual{};
++  ::SHA256(json_bytes.data(), json_bytes.size(), actual.data());
++  if (actual != expected_targets_sha256_) {
++    return TufError::kHashMismatch;
++  }
+   std::optional<base::DictValue> outer = ParseTopLevel(json_bytes);
+   if (!outer) {
+     return TufError::kBadJson;
+@@ -499,6 +550,9 @@ TufError TufClient::IngestTargets(base::span<const uint8_t> json_bytes) {
+       return TufError::kBadJson;
+     }
+     if (const base::DictValue* custom = t->FindDict("custom")) {
++      if (const std::string* v = custom->FindString("version")) {
++        tm.version = *v;
++      }
+       if (const std::string* p = custom->FindString("platform")) {
+         tm.platform = *p;
+       }
+@@ -509,6 +563,7 @@ TufError TufClient::IngestTargets(base::span<const uint8_t> json_bytes) {
+         tm.channel = *c;
+       }
+     }
++    FillTargetFieldsFromName(kv.first, &tm);
+     parsed[kv.first] = std::move(tm);
+   }
+   targets_ = std::move(parsed);
+@@ -523,4 +578,31 @@ std::optional<TargetMeta> TufClient::LookupTarget(std::string_view name) const {
+   return it->second;
+ }
+
++std::optional<TargetMeta> TufClient::FindLatestTarget(
++    std::string_view platform,
++    std::string_view arch,
++    std::string_view channel) const {
++  std::optional<TargetMeta> best;
++  base::Version best_version;
++  for (const auto& kv : targets_) {
++    const TargetMeta& target = kv.second;
++    if (target.platform != platform || target.arch != arch) {
++      continue;
++    }
++    if (!channel.empty() && !target.channel.empty() &&
++        target.channel != channel) {
++      continue;
++    }
++    base::Version target_version(target.version);
++    if (!target_version.IsValid()) {
++      continue;
++    }
++    if (!best.has_value() || target_version.CompareTo(best_version) > 0) {
++      best = target;
++      best_version = target_version;
++    }
++  }
++  return best;
++}
++
+ }  // namespace phlink::updater
+diff --git a/chrome/browser/phlink/updater/metadata_client.h b/chrome/browser/phlink/updater/metadata_client.h
+index 4ca82021d1cf2..f059419563ee0 100644
+--- a/chrome/browser/phlink/updater/metadata_client.h
++++ b/chrome/browser/phlink/updater/metadata_client.h
+@@ -25,18 +25,18 @@ namespace phlink::updater {
+ // `update.log` per docs/dev/update-protocol.md §9.
+ enum class TufError {
+   kOk,
+-  kBadJson,           // not parseable as JSON, or wrong shape.
+-  kBadSignature,      // signature did not verify under the role's keyset.
+-  kThresholdNotMet,   // fewer valid signatures than the role's threshold.
+-  kExpired,           // metadata `expires` is in the past.
+-  kRollback,          // server tried to serve a lower version than cached.
+-  kVersionMismatch,   // snapshot/timestamp pinned a version that does
+-                      // not match the role we just parsed.
+-  kLengthMismatch,    // snapshot.json declared length != actual bytes.
+-  kHashMismatch,      // snapshot.json declared sha256 != actual bytes.
+-  kUnsupportedSpec,   // spec_version outside what we implement.
+-  kUnknownRole,       // referenced role was not declared in root.
+-  kMissingField,      // required JSON field absent.
++  kBadJson,          // not parseable as JSON, or wrong shape.
++  kBadSignature,     // signature did not verify under the role's keyset.
++  kThresholdNotMet,  // fewer valid signatures than the role's threshold.
++  kExpired,          // metadata `expires` is in the past.
++  kRollback,         // server tried to serve a lower version than cached.
++  kVersionMismatch,  // snapshot/timestamp pinned a version that does
++                     // not match the role we just parsed.
++  kLengthMismatch,   // snapshot.json declared length != actual bytes.
++  kHashMismatch,     // snapshot.json declared sha256 != actual bytes.
++  kUnsupportedSpec,  // spec_version outside what we implement.
++  kUnknownRole,      // referenced role was not declared in root.
++  kMissingField,     // required JSON field absent.
+ };
+
+ // One entry from `targets.json`'s `targets` map. v1.0 alpha only carries
+@@ -53,6 +53,7 @@ struct TargetMeta {
+   std::string name;
+   uint64_t length = 0;
+   std::array<uint8_t, 32> sha256{};
++  std::string version;
+   std::string platform;
+   std::string arch;
+   std::string channel;
+@@ -87,6 +88,9 @@ class TufClient {
+   TufError IngestTargets(base::span<const uint8_t> targets_json);
+
+   std::optional<TargetMeta> LookupTarget(std::string_view name) const;
++  std::optional<TargetMeta> FindLatestTarget(std::string_view platform,
++                                             std::string_view arch,
++                                             std::string_view channel) const;
+
+   uint64_t timestamp_version() const { return timestamp_version_; }
+   uint64_t snapshot_version() const { return snapshot_version_; }
+@@ -131,6 +135,8 @@ class TufClient {
+
+   // Pinned by snapshot.json.
+   uint64_t expected_targets_version_ = 0;
++  uint64_t expected_targets_length_ = 0;
++  std::array<uint8_t, 32> expected_targets_sha256_{};
+   bool targets_pin_set_ = false;
+
+   std::map<std::string, TargetMeta> targets_;
+diff --git a/chrome/browser/phlink/updater/metadata_client_unittest.cc b/chrome/browser/phlink/updater/metadata_client_unittest.cc
+index 903c0bb2af472..dcf34a8ff9d10 100644
+--- a/chrome/browser/phlink/updater/metadata_client_unittest.cc
++++ b/chrome/browser/phlink/updater/metadata_client_unittest.cc
+@@ -34,18 +34,18 @@ const char kPastExpires[] = "2000-01-01T00:00:00Z";
+
+ TEST(TufClientTest, AcceptsValidMetadata) {
+   TestKey root = MakeTestKey();
+-  std::string root_json = Envelope(BuildRootSigned(root, kFutureExpires),
+-                                   {&root});
++  std::string root_json =
++      Envelope(BuildRootSigned(root, kFutureExpires), {&root});
+
+   auto client = TufClient::CreateWithRoot(Bytes(root_json), SomeNow());
+   ASSERT_TRUE(client.has_value());
+
++  std::string tgt_json =
++      Envelope(BuildTargetsSigned(1, kFutureExpires), {&root});
+   std::string snap_json =
+-      Envelope(BuildSnapshotSigned(1, kFutureExpires, 1), {&root});
++      Envelope(BuildSnapshotSigned(1, kFutureExpires, 1, tgt_json), {&root});
+   std::string ts_json =
+       Envelope(BuildTimestampSigned(1, kFutureExpires, 1, snap_json), {&root});
+-  std::string tgt_json =
+-      Envelope(BuildTargetsSigned(1, kFutureExpires), {&root});
+
+   EXPECT_EQ(TufError::kOk, client->IngestTimestamp(Bytes(ts_json)));
+   EXPECT_EQ(TufError::kOk, client->IngestSnapshot(Bytes(snap_json)));
+@@ -60,8 +60,10 @@ TEST(TufClientTest, RejectsExpiredTimestamp) {
+   auto client = TufClient::CreateWithRoot(Bytes(root_json), SomeNow());
+   ASSERT_TRUE(client.has_value());
+
++  std::string tgt_json =
++      Envelope(BuildTargetsSigned(1, kFutureExpires), {&root});
+   std::string snap_json =
+-      Envelope(BuildSnapshotSigned(1, kFutureExpires, 1), {&root});
++      Envelope(BuildSnapshotSigned(1, kFutureExpires, 1, tgt_json), {&root});
+   std::string ts_json =
+       Envelope(BuildTimestampSigned(1, kPastExpires, 1, snap_json), {&root});
+   EXPECT_EQ(TufError::kExpired, client->IngestTimestamp(Bytes(ts_json)));
+@@ -74,14 +76,16 @@ TEST(TufClientTest, RejectsRollback) {
+   auto client = TufClient::CreateWithRoot(Bytes(root_json), SomeNow());
+   ASSERT_TRUE(client.has_value());
+
++  std::string tgt_json =
++      Envelope(BuildTargetsSigned(1, kFutureExpires), {&root});
+   std::string snap5 =
+-      Envelope(BuildSnapshotSigned(5, kFutureExpires, 1), {&root});
++      Envelope(BuildSnapshotSigned(5, kFutureExpires, 1, tgt_json), {&root});
+   std::string ts5 =
+       Envelope(BuildTimestampSigned(5, kFutureExpires, 5, snap5), {&root});
+   ASSERT_EQ(TufError::kOk, client->IngestTimestamp(Bytes(ts5)));
+
+   std::string snap3 =
+-      Envelope(BuildSnapshotSigned(3, kFutureExpires, 1), {&root});
++      Envelope(BuildSnapshotSigned(3, kFutureExpires, 1, tgt_json), {&root});
+   std::string ts3 =
+       Envelope(BuildTimestampSigned(3, kFutureExpires, 3, snap3), {&root});
+   EXPECT_EQ(TufError::kRollback, client->IngestTimestamp(Bytes(ts3)));
+@@ -101,15 +105,101 @@ TEST(TufClientTest, RejectsBadSignature) {
+   auto client = TufClient::CreateWithRoot(Bytes(root_json), SomeNow());
+   ASSERT_TRUE(client.has_value());
+
++  std::string tgt_json =
++      Envelope(BuildTargetsSigned(1, kFutureExpires), {&root});
+   std::string snap_json =
+-      Envelope(BuildSnapshotSigned(1, kFutureExpires, 1), {&root});
++      Envelope(BuildSnapshotSigned(1, kFutureExpires, 1, tgt_json), {&root});
+   // Sign the timestamp with the impostor's private key, but tag the
+   // signature with the root's keyid.
+-  std::string ts_json =
+-      Envelope(BuildTimestampSigned(1, kFutureExpires, 1, snap_json),
+-               {&forgery});
++  std::string ts_json = Envelope(
++      BuildTimestampSigned(1, kFutureExpires, 1, snap_json), {&forgery});
+   EXPECT_EQ(TufError::kBadSignature, client->IngestTimestamp(Bytes(ts_json)));
+ }
+
++TEST(TufClientTest, ParsesDottedVersionTargetFromFilename) {
++  TestKey root = MakeTestKey();
++  std::string root_json =
++      Envelope(BuildRootSigned(root, kFutureExpires), {&root});
++  auto client = TufClient::CreateWithRoot(Bytes(root_json), SomeNow());
++  ASSERT_TRUE(client.has_value());
++
++  std::array<uint8_t, 32> sha{};
++  std::string tgt_json =
++      Envelope(test_helpers::BuildTargetsSignedWithEntry(
++                   1, kFutureExpires, "phlink-0.1.0-mac-arm64.zip", 1024, sha),
++               {&root});
++  std::string snap_json =
++      Envelope(BuildSnapshotSigned(1, kFutureExpires, 1, tgt_json), {&root});
++  std::string ts_json =
++      Envelope(BuildTimestampSigned(1, kFutureExpires, 1, snap_json), {&root});
++
++  ASSERT_EQ(TufError::kOk, client->IngestTimestamp(Bytes(ts_json)));
++  ASSERT_EQ(TufError::kOk, client->IngestSnapshot(Bytes(snap_json)));
++  ASSERT_EQ(TufError::kOk, client->IngestTargets(Bytes(tgt_json)));
++
++  std::optional<TargetMeta> target =
++      client->FindLatestTarget("mac", "arm64", "stable");
++  ASSERT_TRUE(target.has_value());
++  EXPECT_EQ(target->version, "0.1.0");
++  EXPECT_EQ(target->platform, "mac");
++  EXPECT_EQ(target->arch, "arm64");
++}
++
++TEST(TufClientTest, ParsesExtensionlessLinuxUpdateTargetFromFilename) {
++  TestKey root = MakeTestKey();
++  std::string root_json =
++      Envelope(BuildRootSigned(root, kFutureExpires), {&root});
++  auto client = TufClient::CreateWithRoot(Bytes(root_json), SomeNow());
++  ASSERT_TRUE(client.has_value());
++
++  std::array<uint8_t, 32> sha{};
++  std::string tgt_json = Envelope(
++      test_helpers::BuildTargetsSignedWithEntry(
++          1, kFutureExpires, "phlink-0.1.0-linux-x86_64-update", 1024, sha),
++      {&root});
++  std::string snap_json =
++      Envelope(BuildSnapshotSigned(1, kFutureExpires, 1, tgt_json), {&root});
++  std::string ts_json =
++      Envelope(BuildTimestampSigned(1, kFutureExpires, 1, snap_json), {&root});
++
++  ASSERT_EQ(TufError::kOk, client->IngestTimestamp(Bytes(ts_json)));
++  ASSERT_EQ(TufError::kOk, client->IngestSnapshot(Bytes(snap_json)));
++  ASSERT_EQ(TufError::kOk, client->IngestTargets(Bytes(tgt_json)));
++
++  std::optional<TargetMeta> target =
++      client->FindLatestTarget("linux", "x86_64", "stable");
++  ASSERT_TRUE(target.has_value());
++  EXPECT_EQ(target->version, "0.1.0");
++  EXPECT_EQ(target->platform, "linux");
++  EXPECT_EQ(target->arch, "x86_64");
++}
++
++TEST(TufClientTest, RejectsTargetsBytesNotPinnedBySnapshot) {
++  TestKey root = MakeTestKey();
++  std::string root_json =
++      Envelope(BuildRootSigned(root, kFutureExpires), {&root});
++  auto client = TufClient::CreateWithRoot(Bytes(root_json), SomeNow());
++  ASSERT_TRUE(client.has_value());
++
++  std::array<uint8_t, 32> sha{};
++  std::string pinned_tgt_json =
++      Envelope(test_helpers::BuildTargetsSignedWithEntry(
++                   1, kFutureExpires, "phlink-0.1.0-mac-arm64.zip", 1024, sha),
++               {&root});
++  std::string served_tgt_json =
++      Envelope(test_helpers::BuildTargetsSignedWithEntry(
++                   1, kFutureExpires, "phlink-0.2.0-mac-arm64.zip", 1024, sha),
++               {&root});
++  std::string snap_json = Envelope(
++      BuildSnapshotSigned(1, kFutureExpires, 1, pinned_tgt_json), {&root});
++  std::string ts_json =
++      Envelope(BuildTimestampSigned(1, kFutureExpires, 1, snap_json), {&root});
++
++  ASSERT_EQ(TufError::kOk, client->IngestTimestamp(Bytes(ts_json)));
++  ASSERT_EQ(TufError::kOk, client->IngestSnapshot(Bytes(snap_json)));
++  EXPECT_EQ(TufError::kHashMismatch,
++            client->IngestTargets(Bytes(served_tgt_json)));
++}
++
+ }  // namespace
+ }  // namespace phlink::updater
+diff --git a/chrome/browser/phlink/updater/metadata_fetcher_unittest.cc b/chrome/browser/phlink/updater/metadata_fetcher_unittest.cc
+index 10cdf233d7ada..8cde9ca9635c3 100644
+--- a/chrome/browser/phlink/updater/metadata_fetcher_unittest.cc
++++ b/chrome/browser/phlink/updater/metadata_fetcher_unittest.cc
+@@ -56,12 +56,12 @@ class MetadataFetcherTest : public ::testing::Test {
+   // Primes the fake URL-loader factory with a valid metadata trio under
+   // `kBaseUrl`.
+   void SeedHappyPath(const TestKey& root_key) {
+-    std::string snap_json =
+-        Envelope(BuildSnapshotSigned(1, kFutureExpires, 1), {&root_key});
+-    std::string ts_json = Envelope(
+-        BuildTimestampSigned(1, kFutureExpires, 1, snap_json), {&root_key});
+     std::string tgt_json =
+         Envelope(BuildTargetsSigned(1, kFutureExpires), {&root_key});
++    std::string snap_json = Envelope(
++        BuildSnapshotSigned(1, kFutureExpires, 1, tgt_json), {&root_key});
++    std::string ts_json = Envelope(
++        BuildTimestampSigned(1, kFutureExpires, 1, snap_json), {&root_key});
+     loader_factory_.AddResponse(GURL("https://updates.example/timestamp.json"),
+                                 /*head=*/network::mojom::URLResponseHead::New(),
+                                 ts_json,
+@@ -77,12 +77,10 @@ class MetadataFetcherTest : public ::testing::Test {
+   }
+
+   TufError RunFetch(TufClient* client) {
+-    MetadataFetcher fetcher(shared_factory_,
+-                            GURL("https://updates.example/"));
++    MetadataFetcher fetcher(shared_factory_, GURL("https://updates.example/"));
+     base::RunLoop run_loop;
+     TufError result = TufError::kOk;
+-    fetcher.Fetch(client,
+-                  base::BindLambdaForTesting([&](TufError err) {
++    fetcher.Fetch(client, base::BindLambdaForTesting([&](TufError err) {
+                     result = err;
+                     run_loop.Quit();
+                   }));
+@@ -113,8 +111,7 @@ TEST_F(MetadataFetcherTest, NetworkErrorOnTimestampPropagates) {
+   // Don't seed timestamp.json -- give it a 500 instead. snapshot/targets
+   // are irrelevant since the fetch should bail out at stage 1.
+   loader_factory_.AddResponse("https://updates.example/timestamp.json",
+-                              /*content=*/"",
+-                              net::HTTP_INTERNAL_SERVER_ERROR);
++                              /*content=*/"", net::HTTP_INTERNAL_SERVER_ERROR);
+
+   EXPECT_NE(TufError::kOk, RunFetch(&client));
+   EXPECT_EQ(client.timestamp_version(), 0u);
+diff --git a/chrome/browser/phlink/updater/metadata_test_helpers.cc b/chrome/browser/phlink/updater/metadata_test_helpers.cc
+index 6d11363384825..b996f61aee0b6 100644
+--- a/chrome/browser/phlink/updater/metadata_test_helpers.cc
++++ b/chrome/browser/phlink/updater/metadata_test_helpers.cc
+@@ -20,9 +20,7 @@ TestKey::TestKey()
+ TestKey::TestKey(crypto::keypair::PrivateKey priv,
+                  std::array<uint8_t, 32> pub,
+                  std::string id)
+-    : private_key(std::move(priv)),
+-      public_bytes(pub),
+-      keyid(std::move(id)) {}
++    : private_key(std::move(priv)), public_bytes(pub), keyid(std::move(id)) {}
+
+ TestKey::TestKey(const TestKey&) = default;
+ TestKey::TestKey(TestKey&&) = default;
+@@ -50,8 +48,8 @@ TestKey MakeTestKey() {
+   std::string canonical = *EncodeCanonicalJson(v);
+
+   std::array<uint8_t, 32> hash{};
+-  ::SHA256(reinterpret_cast<const uint8_t*>(canonical.data()),
+-           canonical.size(), hash.data());
++  ::SHA256(reinterpret_cast<const uint8_t*>(canonical.data()), canonical.size(),
++           hash.data());
+
+   return TestKey(std::move(priv), pub, ToHex(hash));
+ }
+@@ -140,9 +138,17 @@ base::DictValue BuildTimestampSigned(int version,
+
+ base::DictValue BuildSnapshotSigned(int version,
+                                     const std::string& expires,
+-                                    int targets_version) {
++                                    int targets_version,
++                                    const std::string& targets_bytes) {
++  std::array<uint8_t, 32> sha{};
++  ::SHA256(reinterpret_cast<const uint8_t*>(targets_bytes.data()),
++           targets_bytes.size(), sha.data());
++  base::DictValue hashes;
++  hashes.Set("sha256", ToHex(sha));
+   base::DictValue tgt_meta;
+   tgt_meta.Set("version", targets_version);
++  tgt_meta.Set("length", static_cast<int>(targets_bytes.size()));
++  tgt_meta.Set("hashes", std::move(hashes));
+   base::DictValue meta;
+   meta.Set("targets.json", std::move(tgt_meta));
+   base::DictValue s;
+diff --git a/chrome/browser/phlink/updater/metadata_test_helpers.h b/chrome/browser/phlink/updater/metadata_test_helpers.h
+index 8f44a8c0447c4..ba6e544d754ce 100644
+--- a/chrome/browser/phlink/updater/metadata_test_helpers.h
++++ b/chrome/browser/phlink/updater/metadata_test_helpers.h
+@@ -49,7 +49,8 @@ base::DictValue BuildTimestampSigned(int version,
+                                      const std::string& snapshot_bytes);
+ base::DictValue BuildSnapshotSigned(int version,
+                                     const std::string& expires,
+-                                    int targets_version);
++                                    int targets_version,
++                                    const std::string& targets_bytes);
+ base::DictValue BuildTargetsSigned(int version, const std::string& expires);
+
+ // Variant that lets the caller pin one specific target entry (name +
+diff --git a/chrome/browser/phlink/updater/payload_fetcher.cc b/chrome/browser/phlink/updater/payload_fetcher.cc
+index 438d6ba8f3c9b..6837ccf736d50 100644
+--- a/chrome/browser/phlink/updater/payload_fetcher.cc
++++ b/chrome/browser/phlink/updater/payload_fetcher.cc
+@@ -83,21 +83,40 @@ void PayloadFetcher::Fetch(GURL url,
+   expected_length_ = expected_length;
+   expected_sha256_ = expected_sha256;
+
+-  base::FilePath payload_path = staging_dir_.Append(FILE_PATH_LITERAL("payload.zip"));
++  blocking_runner_->PostTaskAndReplyWithResult(
++      FROM_HERE,
++      base::BindOnce(
++          [](base::FilePath dir) { return base::CreateDirectory(dir); },
++          staging_dir_),
++      base::BindOnce(&PayloadFetcher::OnStagingDirReady,
++                     weak_factory_.GetWeakPtr(), std::move(url)));
++}
++
++void PayloadFetcher::OnStagingDirReady(GURL url, bool created) {
++  if (!created) {
++    PayloadFetchResult result;
++    result.error = PayloadFetchError::kIo;
++    if (callback_) {
++      std::move(callback_).Run(std::move(result));
++    }
++    return;
++  }
++
++  base::FilePath payload_path =
++      staging_dir_.Append(FILE_PATH_LITERAL("payload.zip"));
+
+   auto request = std::make_unique<network::ResourceRequest>();
+   request->url = std::move(url);
+   request->method = "GET";
+   request->credentials_mode = network::mojom::CredentialsMode::kOmit;
+   request->load_flags = net::LOAD_DISABLE_CACHE | net::LOAD_BYPASS_CACHE |
+-                       net::LOAD_DO_NOT_SAVE_COOKIES;
++                        net::LOAD_DO_NOT_SAVE_COOKIES;
+
+-  loader_ = network::SimpleURLLoader::Create(std::move(request),
+-                                             kTrafficAnnotation);
++  loader_ =
++      network::SimpleURLLoader::Create(std::move(request), kTrafficAnnotation);
+   loader_->DownloadToFile(
+       factory_.get(),
+-      base::BindOnce(&PayloadFetcher::OnDownloaded,
+-                     weak_factory_.GetWeakPtr()),
++      base::BindOnce(&PayloadFetcher::OnDownloaded, weak_factory_.GetWeakPtr()),
+       payload_path, max_payload_bytes_);
+ }
+
+@@ -114,8 +133,7 @@ void PayloadFetcher::OnDownloaded(base::FilePath path) {
+       FROM_HERE,
+       base::BindOnce(&PayloadFetcher::VerifyOnBlockingThread, path,
+                      expected_length_, expected_sha256_),
+-      base::BindOnce(&PayloadFetcher::OnVerified,
+-                     weak_factory_.GetWeakPtr()));
++      base::BindOnce(&PayloadFetcher::OnVerified, weak_factory_.GetWeakPtr()));
+ }
+
+ // static
+diff --git a/chrome/browser/phlink/updater/payload_fetcher.h b/chrome/browser/phlink/updater/payload_fetcher.h
+index bee5e835637b1..836ba0a532068 100644
+--- a/chrome/browser/phlink/updater/payload_fetcher.h
++++ b/chrome/browser/phlink/updater/payload_fetcher.h
+@@ -75,6 +75,7 @@ class PayloadFetcher {
+     base::FilePath path;  // empty unless `error == kOk`.
+   };
+
++  void OnStagingDirReady(GURL url, bool created);
+   void OnDownloaded(base::FilePath path);
+   static VerifyOutcome VerifyOnBlockingThread(
+       base::FilePath path,
+diff --git a/chrome/browser/phlink/updater/payload_fetcher_unittest.cc b/chrome/browser/phlink/updater/payload_fetcher_unittest.cc
+index 2508d4801b774..a34cf057ef626 100644
+--- a/chrome/browser/phlink/updater/payload_fetcher_unittest.cc
++++ b/chrome/browser/phlink/updater/payload_fetcher_unittest.cc
+@@ -32,10 +32,12 @@ class PayloadFetcherTest : public ::testing::Test {
+
+   base::FilePath staging() const { return temp_dir_.GetPath(); }
+
+-  PayloadFetchResult RunFetch(GURL url,
+-                              uint64_t expected_length,
+-                              std::array<uint8_t, 32> expected_sha256) {
+-    PayloadFetcher fetcher(shared_factory_, staging());
++  PayloadFetchResult RunFetchInStaging(
++      base::FilePath staging_dir,
++      GURL url,
++      uint64_t expected_length,
++      std::array<uint8_t, 32> expected_sha256) {
++    PayloadFetcher fetcher(shared_factory_, std::move(staging_dir));
+     base::RunLoop run_loop;
+     PayloadFetchResult got;
+     fetcher.Fetch(std::move(url), expected_length, expected_sha256,
+@@ -47,6 +49,13 @@ class PayloadFetcherTest : public ::testing::Test {
+     return got;
+   }
+
++  PayloadFetchResult RunFetch(GURL url,
++                              uint64_t expected_length,
++                              std::array<uint8_t, 32> expected_sha256) {
++    return RunFetchInStaging(staging(), std::move(url), expected_length,
++                             expected_sha256);
++  }
++
+   base::test::TaskEnvironment task_env_;
+   base::ScopedTempDir temp_dir_;
+   network::TestURLLoaderFactory loader_factory_;
+@@ -67,6 +76,21 @@ TEST_F(PayloadFetcherTest, HappyPathDownloadsAndVerifies) {
+   EXPECT_EQ(on_disk, body);
+ }
+
++TEST_F(PayloadFetcherTest, CreatesMissingStagingDirectory) {
++  const std::string body = "hello nested phlink payload";
++  const GURL url("https://updates.example/payload.zip");
++  loader_factory_.AddResponse(url.spec(), body, net::HTTP_OK);
++
++  base::FilePath nested = staging().Append(FILE_PATH_LITERAL("Updates/0.1.1"));
++  ASSERT_FALSE(base::PathExists(nested));
++
++  PayloadFetchResult got =
++      RunFetchInStaging(nested, url, body.size(), crypto::hash::Sha256(body));
++  EXPECT_EQ(got.error, PayloadFetchError::kOk);
++  EXPECT_TRUE(base::PathExists(nested));
++  EXPECT_TRUE(base::PathExists(got.payload_path));
++}
++
+ TEST_F(PayloadFetcherTest, HashMismatchDeletesFile) {
+   const std::string body = "actual bytes";
+   const GURL url("https://updates.example/payload.zip");
+@@ -76,7 +100,8 @@ TEST_F(PayloadFetcherTest, HashMismatchDeletesFile) {
+   PayloadFetchResult got = RunFetch(url, body.size(), wrong);
+   EXPECT_EQ(got.error, PayloadFetchError::kHashMismatch);
+   EXPECT_TRUE(got.payload_path.empty());
+-  EXPECT_FALSE(base::PathExists(staging().Append(FILE_PATH_LITERAL("payload.zip"))));
++  EXPECT_FALSE(
++      base::PathExists(staging().Append(FILE_PATH_LITERAL("payload.zip"))));
+ }
+
+ TEST_F(PayloadFetcherTest, LengthMismatchDeletesFile) {
+@@ -87,7 +112,8 @@ TEST_F(PayloadFetcherTest, LengthMismatchDeletesFile) {
+   PayloadFetchResult got =
+       RunFetch(url, /*expected_length=*/999, crypto::hash::Sha256(body));
+   EXPECT_EQ(got.error, PayloadFetchError::kLengthMismatch);
+-  EXPECT_FALSE(base::PathExists(staging().Append(FILE_PATH_LITERAL("payload.zip"))));
++  EXPECT_FALSE(
++      base::PathExists(staging().Append(FILE_PATH_LITERAL("payload.zip"))));
+ }
+
+ TEST_F(PayloadFetcherTest, NetworkErrorReportsKNetwork) {
+diff --git a/chrome/browser/phlink/updater/phlink_updater.gni b/chrome/browser/phlink/updater/phlink_updater.gni
+index 6ae26ca38ea34..11dc55034bc57 100644
+--- a/chrome/browser/phlink/updater/phlink_updater.gni
++++ b/chrome/browser/phlink/updater/phlink_updater.gni
+@@ -3,10 +3,20 @@
+ # found in the LICENSE file.
+
+ declare_args() {
+-  # When true, ship the dev-only root.json (single 1-of-1 dev keypair) under
+-  # `chrome/browser/phlink/updater/keys/dev_root.json`. Production builds
+-  # MUST set this to false and supply `prod_root.json` instead. Phase 10
+-  # plan 10-08 wires the production keys; until then the dev root is the
+-  # only thing in tree.
++  # When true and `phlink_updater_root_json` is empty, ship the dev-only
++  # root.json (single 1-of-1 dev keypair) to the stable runtime path.
++  # Production builds MUST set this to false and set
++  # `phlink_updater_root_json` to the signed production root metadata.
+   phlink_updater_dev_root = true
++
++  # Optional path to signed production root metadata. When set, this is copied
++  # to `$root_out_dir/resources/phlink/keys/root.json` and is what the updater
++  # trusts on unbundled platforms. macOS packaging embeds the same file under
++  # Contents/Resources.
++  phlink_updater_root_json = ""
++
++  # phlink product version used by the updater's version comparison.
++  # Release builds must set this to the same value passed to installer and
++  # release-signing workflows, e.g. `phlink_product_version = "0.1.0"`.
++  phlink_product_version = "0.1.0"
+ }
+diff --git a/chrome/browser/phlink/updater/update_check_pipeline.cc b/chrome/browser/phlink/updater/update_check_pipeline.cc
+index ebf601ce5ff37..74cba00b11fa1 100644
+--- a/chrome/browser/phlink/updater/update_check_pipeline.cc
++++ b/chrome/browser/phlink/updater/update_check_pipeline.cc
+@@ -10,6 +10,7 @@
+ #include "base/files/file_path.h"
+ #include "base/functional/bind.h"
+ #include "base/time/time.h"
++#include "base/version.h"
+ #include "chrome/browser/phlink/updater/metadata_fetcher.h"
+ #include "chrome/browser/phlink/updater/payload_fetcher.h"
+ #include "chrome/browser/phlink/updater/staged_payload.h"
+@@ -30,7 +31,9 @@ UpdateCheckPipeline::UpdateCheckPipeline(
+   CHECK(factory_);
+   CHECK(config_.metadata_base_url.is_valid());
+   CHECK(config_.payload_base_url.is_valid());
+-  CHECK(!config_.target_name.empty());
++  CHECK(base::Version(config_.current_version).IsValid());
++  CHECK(!config_.target_platform.empty());
++  CHECK(!config_.target_arch.empty());
+   CHECK(!config_.staging_dir.empty());
+ }
+
+@@ -48,12 +51,11 @@ void UpdateCheckPipeline::Run(ResultCallback callback) {
+   }
+   client_ = std::make_unique<TufClient>(std::move(client_or).value());
+
+-  metadata_fetcher_ = std::make_unique<MetadataFetcher>(
+-      factory_, config_.metadata_base_url);
++  metadata_fetcher_ =
++      std::make_unique<MetadataFetcher>(factory_, config_.metadata_base_url);
+   metadata_fetcher_->Fetch(
+-      client_.get(),
+-      base::BindOnce(&UpdateCheckPipeline::OnMetadataFetched,
+-                     weak_factory_.GetWeakPtr()));
++      client_.get(), base::BindOnce(&UpdateCheckPipeline::OnMetadataFetched,
++                                    weak_factory_.GetWeakPtr()));
+ }
+
+ void UpdateCheckPipeline::OnMetadataFetched(TufError err) {
+@@ -62,20 +64,31 @@ void UpdateCheckPipeline::OnMetadataFetched(TufError err) {
+     Finish(Outcome::kMetadataError);
+     return;
+   }
+-  std::optional<TargetMeta> target =
+-      client_->LookupTarget(config_.target_name);
++  std::optional<TargetMeta> target = client_->FindLatestTarget(
++      config_.target_platform, config_.target_arch, config_.channel);
+   if (!target.has_value()) {
+     Finish(Outcome::kTargetMissing);
+     return;
+   }
++  base::Version current_version(config_.current_version);
++  base::Version target_version(target->version);
++  if (!target_version.IsValid()) {
++    Finish(Outcome::kMetadataError);
++    return;
++  }
++  if (target_version.CompareTo(current_version) <= 0) {
++    Finish(Outcome::kUpToDate);
++    return;
++  }
++  selected_target_version_ = target->version;
+
+   GURL payload_url = config_.payload_base_url.Resolve(target->name);
+   payload_fetcher_ =
+       std::make_unique<PayloadFetcher>(factory_, config_.staging_dir);
+-  payload_fetcher_->Fetch(
+-      std::move(payload_url), target->length, target->sha256,
+-      base::BindOnce(&UpdateCheckPipeline::OnPayloadFetched,
+-                     weak_factory_.GetWeakPtr()));
++  payload_fetcher_->Fetch(std::move(payload_url), target->length,
++                          target->sha256,
++                          base::BindOnce(&UpdateCheckPipeline::OnPayloadFetched,
++                                         weak_factory_.GetWeakPtr()));
+ }
+
+ void UpdateCheckPipeline::OnPayloadFetched(PayloadFetchResult result) {
+@@ -85,7 +98,7 @@ void UpdateCheckPipeline::OnPayloadFetched(PayloadFetchResult result) {
+     return;
+   }
+   StagedPayload staged;
+-  staged.version = config_.target_version;
++  staged.version = selected_target_version_;
+   staged.payload_path = result.payload_path;
+   staged.verified_at = base::Time::Now();
+   if (!WriteStagedPayloadJson(config_.staging_dir, staged)) {
+diff --git a/chrome/browser/phlink/updater/update_check_pipeline.h b/chrome/browser/phlink/updater/update_check_pipeline.h
+index 52546ec0e6471..912af3aad1a23 100644
+--- a/chrome/browser/phlink/updater/update_check_pipeline.h
++++ b/chrome/browser/phlink/updater/update_check_pipeline.h
+@@ -36,12 +36,12 @@ class PayloadFetcher;
+ class UpdateCheckPipeline {
+  public:
+   enum class Outcome {
+-    kOk,                // staged.json written; update ready for next launch.
+-    kUpToDate,          // metadata says no newer version is available.
+-    kMetadataError,     // TUF verification or network error during metadata.
+-    kTargetMissing,     // `targets.json` doesn't list our platform/arch.
+-    kPayloadError,      // payload network/length/hash failure.
+-    kIoError,           // staged.json could not be written.
++    kOk,             // staged.json written; update ready for next launch.
++    kUpToDate,       // metadata says no newer version is available.
++    kMetadataError,  // TUF verification or network error during metadata.
++    kTargetMissing,  // `targets.json` doesn't list our platform/arch.
++    kPayloadError,   // payload network/length/hash failure.
++    kIoError,        // staged.json could not be written.
+   };
+   using ResultCallback = base::OnceCallback<void(Outcome)>;
+
+@@ -59,12 +59,11 @@ class UpdateCheckPipeline {
+     GURL metadata_base_url;
+     // Base URL of the payload artifacts.
+     GURL payload_base_url;
+-    // Filename to look for in `targets.json` (e.g.
+-    // "phlink-1.2.3-mac-arm64.zip"). Computed by the factory from the
+-    // running platform/arch and the running phlink version.
+-    std::string target_name;
+-    // Version label written into `staged.json`.
+-    std::string target_version;
++    // Running product tuple used to select the newest matching signed target.
++    std::string current_version;
++    std::string target_platform;
++    std::string target_arch;
++    std::string channel;
+     // Directory where `payload.zip` and `staged.json` will be written.
+     base::FilePath staging_dir;
+   };
+@@ -88,6 +87,7 @@ class UpdateCheckPipeline {
+   std::unique_ptr<MetadataFetcher> metadata_fetcher_;
+   std::unique_ptr<PayloadFetcher> payload_fetcher_;
+   ResultCallback callback_;
++  std::string selected_target_version_;
+   base::WeakPtrFactory<UpdateCheckPipeline> weak_factory_{this};
+ };
+
+diff --git a/chrome/browser/phlink/updater/update_check_pipeline_unittest.cc b/chrome/browser/phlink/updater/update_check_pipeline_unittest.cc
+index 3648682d942df..c6b9239d8e3ca 100644
+--- a/chrome/browser/phlink/updater/update_check_pipeline_unittest.cc
++++ b/chrome/browser/phlink/updater/update_check_pipeline_unittest.cc
+@@ -27,15 +27,62 @@ namespace {
+
+ using test_helpers::BuildRootSigned;
+ using test_helpers::BuildSnapshotSigned;
+-using test_helpers::BuildTargetsSigned;
+ using test_helpers::BuildTimestampSigned;
+-using test_helpers::Bytes;
+ using test_helpers::Envelope;
+ using test_helpers::MakeTestKey;
+ using test_helpers::TestKey;
+
+ constexpr char kFutureExpires[] = "2099-01-01T00:00:00Z";
+-constexpr char kTargetName[] = "phlink-1.0.0-mac-arm64.zip";
++
++struct TargetFixture {
++  std::string name;
++  std::string version;
++  std::string platform = "mac";
++  std::string arch = "arm64";
++  std::string channel = "stable";
++  uint64_t length = 0;
++  std::array<uint8_t, 32> sha256{};
++};
++
++TargetFixture MakeTarget(const std::string& name,
++                         const std::string& version,
++                         const std::string& payload_body) {
++  TargetFixture target;
++  target.name = name;
++  target.version = version;
++  target.length = payload_body.size();
++  target.sha256 = crypto::hash::Sha256(payload_body);
++  return target;
++}
++
++base::DictValue BuildTargetsSignedWithEntries(
++    int version,
++    const std::string& expires,
++    const std::vector<TargetFixture>& fixtures) {
++  base::DictValue targets;
++  for (const TargetFixture& fixture : fixtures) {
++    base::DictValue hashes;
++    hashes.Set("sha256", test_helpers::ToHex(fixture.sha256));
++    base::DictValue custom;
++    custom.Set("version", fixture.version);
++    custom.Set("platform", fixture.platform);
++    custom.Set("arch", fixture.arch);
++    custom.Set("channel", fixture.channel);
++    base::DictValue target;
++    target.Set("length", static_cast<int>(fixture.length));
++    target.Set("hashes", std::move(hashes));
++    target.Set("custom", std::move(custom));
++    targets.Set(fixture.name, std::move(target));
++  }
++
++  base::DictValue signed_dict;
++  signed_dict.Set("_type", "targets");
++  signed_dict.Set("spec_version", "1.0.32");
++  signed_dict.Set("version", version);
++  signed_dict.Set("expires", expires);
++  signed_dict.Set("targets", std::move(targets));
++  return signed_dict;
++}
+
+ class UpdateCheckPipelineTest : public ::testing::Test {
+  protected:
+@@ -47,16 +94,13 @@ class UpdateCheckPipelineTest : public ::testing::Test {
+   base::FilePath staging() const { return temp_dir_.GetPath(); }
+
+   void SeedMetadata(const TestKey& root_key,
+-                    const std::string& payload_body) {
+-    std::array<uint8_t, 32> body_sha = crypto::hash::Sha256(payload_body);
++                    const std::vector<TargetFixture>& targets) {
+     std::string tgt_json = Envelope(
+-        test_helpers::BuildTargetsSignedWithEntry(
+-            /*version=*/1, kFutureExpires, kTargetName,
+-            /*length=*/payload_body.size(), body_sha),
++        BuildTargetsSignedWithEntries(/*version=*/1, kFutureExpires, targets),
+         {&root_key});
+
+-    std::string snap_json =
+-        Envelope(BuildSnapshotSigned(1, kFutureExpires, 1), {&root_key});
++    std::string snap_json = Envelope(
++        BuildSnapshotSigned(1, kFutureExpires, 1, tgt_json), {&root_key});
+     std::string ts_json = Envelope(
+         BuildTimestampSigned(1, kFutureExpires, 1, snap_json), {&root_key});
+
+@@ -69,20 +113,22 @@ class UpdateCheckPipelineTest : public ::testing::Test {
+   }
+
+   UpdateCheckPipeline::Outcome RunPipeline(std::vector<uint8_t> root_json,
+-                                           const std::string& target_name) {
++                                           const std::string& current_version) {
+     UpdateCheckPipeline::Config cfg;
+     cfg.root_json = std::move(root_json);
+     cfg.metadata_base_url = GURL("https://updates.example/");
+     cfg.payload_base_url = GURL("https://updates.example/payloads/");
+-    cfg.target_name = target_name;
+-    cfg.target_version = "1.0.0";
++    cfg.current_version = current_version;
++    cfg.target_platform = "mac";
++    cfg.target_arch = "arm64";
++    cfg.channel = "stable";
+     cfg.staging_dir = staging();
+     UpdateCheckPipeline pipeline(shared_factory_, std::move(cfg));
+     base::RunLoop run_loop;
+     UpdateCheckPipeline::Outcome got =
+         UpdateCheckPipeline::Outcome::kMetadataError;
+-    pipeline.Run(base::BindLambdaForTesting(
+-        [&](UpdateCheckPipeline::Outcome o) {
++    pipeline.Run(
++        base::BindLambdaForTesting([&](UpdateCheckPipeline::Outcome o) {
+           got = o;
+           run_loop.Quit();
+         }));
+@@ -96,24 +142,53 @@ class UpdateCheckPipelineTest : public ::testing::Test {
+   scoped_refptr<network::WeakWrapperSharedURLLoaderFactory> shared_factory_;
+ };
+
+-TEST_F(UpdateCheckPipelineTest, HappyPathWritesStagedJson) {
++TEST_F(UpdateCheckPipelineTest, NewerTargetWritesStagedJson) {
+   TestKey root = MakeTestKey();
+   std::string root_json =
+       Envelope(BuildRootSigned(root, kFutureExpires), {&root});
+   std::vector<uint8_t> root_bytes(root_json.begin(), root_json.end());
+
+   const std::string payload = "phlink update payload bytes";
+-  SeedMetadata(root, payload);
++  const char target_name[] = "phlink-1.1.0-mac-arm64.zip";
++  SeedMetadata(root, {MakeTarget(target_name, "1.1.0", payload)});
+   loader_factory_.AddResponse(
+-      std::string("https://updates.example/payloads/") + kTargetName,
+-      payload, net::HTTP_OK);
++      std::string("https://updates.example/payloads/") + target_name, payload,
++      net::HTTP_OK);
+
+-  EXPECT_EQ(RunPipeline(root_bytes, kTargetName),
++  EXPECT_EQ(RunPipeline(root_bytes, "1.0.0"),
+             UpdateCheckPipeline::Outcome::kOk);
+   EXPECT_TRUE(base::PathExists(staging().AppendASCII("staged.json")));
+   std::optional<StagedPayload> staged = ReadStagedPayloadJson(staging());
+   ASSERT_TRUE(staged.has_value());
+-  EXPECT_EQ(staged->version, "1.0.0");
++  EXPECT_EQ(staged->version, "1.1.0");
++}
++
++TEST_F(UpdateCheckPipelineTest, EqualVersionReturnsUpToDate) {
++  TestKey root = MakeTestKey();
++  std::string root_json =
++      Envelope(BuildRootSigned(root, kFutureExpires), {&root});
++  std::vector<uint8_t> root_bytes(root_json.begin(), root_json.end());
++
++  SeedMetadata(root, {MakeTarget("phlink-1.0.0-mac-arm64.zip", "1.0.0",
++                                 "ignored payload")});
++
++  EXPECT_EQ(RunPipeline(root_bytes, "1.0.0"),
++            UpdateCheckPipeline::Outcome::kUpToDate);
++  EXPECT_FALSE(base::PathExists(staging().AppendASCII("staged.json")));
++}
++
++TEST_F(UpdateCheckPipelineTest, LowerVersionReturnsUpToDate) {
++  TestKey root = MakeTestKey();
++  std::string root_json =
++      Envelope(BuildRootSigned(root, kFutureExpires), {&root});
++  std::vector<uint8_t> root_bytes(root_json.begin(), root_json.end());
++
++  SeedMetadata(root, {MakeTarget("phlink-0.9.0-mac-arm64.zip", "0.9.0",
++                                 "ignored payload")});
++
++  EXPECT_EQ(RunPipeline(root_bytes, "1.0.0"),
++            UpdateCheckPipeline::Outcome::kUpToDate);
++  EXPECT_FALSE(base::PathExists(staging().AppendASCII("staged.json")));
+ }
+
+ TEST_F(UpdateCheckPipelineTest, MetadataErrorOnTimestampPropagates) {
+@@ -125,7 +200,7 @@ TEST_F(UpdateCheckPipelineTest, MetadataErrorOnTimestampPropagates) {
+   loader_factory_.AddResponse("https://updates.example/timestamp.json", "",
+                               net::HTTP_INTERNAL_SERVER_ERROR);
+
+-  EXPECT_EQ(RunPipeline(root_bytes, kTargetName),
++  EXPECT_EQ(RunPipeline(root_bytes, "1.0.0"),
+             UpdateCheckPipeline::Outcome::kMetadataError);
+   EXPECT_FALSE(base::PathExists(staging().AppendASCII("staged.json")));
+ }
+@@ -136,10 +211,12 @@ TEST_F(UpdateCheckPipelineTest, TargetMissingReturnsKTargetMissing) {
+       Envelope(BuildRootSigned(root, kFutureExpires), {&root});
+   std::vector<uint8_t> root_bytes(root_json.begin(), root_json.end());
+
+-  // The default targets fixture only carries `kTargetName`; ask for a
+-  // different platform/arch.
+-  SeedMetadata(root, "ignored");
+-  EXPECT_EQ(RunPipeline(root_bytes, "phlink-1.0.0-linux-x64.zip"),
++  TargetFixture linux_target =
++      MakeTarget("phlink-1.1.0-linux-x86_64.zip", "1.1.0", "ignored");
++  linux_target.platform = "linux";
++  linux_target.arch = "x86_64";
++  SeedMetadata(root, {linux_target});
++  EXPECT_EQ(RunPipeline(root_bytes, "1.0.0"),
+             UpdateCheckPipeline::Outcome::kTargetMissing);
+ }
+
+@@ -150,12 +227,13 @@ TEST_F(UpdateCheckPipelineTest, PayloadHashMismatchReturnsKPayloadError) {
+   std::vector<uint8_t> root_bytes(root_json.begin(), root_json.end());
+
+   // Metadata expects payload "good"; the server returns "evil" instead.
+-  SeedMetadata(root, "good");
++  const char target_name[] = "phlink-1.1.0-mac-arm64.zip";
++  SeedMetadata(root, {MakeTarget(target_name, "1.1.0", "good")});
+   loader_factory_.AddResponse(
+-      std::string("https://updates.example/payloads/") + kTargetName,
+-      "evil", net::HTTP_OK);
++      std::string("https://updates.example/payloads/") + target_name, "evil",
++      net::HTTP_OK);
+
+-  EXPECT_EQ(RunPipeline(root_bytes, kTargetName),
++  EXPECT_EQ(RunPipeline(root_bytes, "1.0.0"),
+             UpdateCheckPipeline::Outcome::kPayloadError);
+ }
+
+diff --git a/chrome/browser/phlink/updater/updater_service_factory.cc b/chrome/browser/phlink/updater/updater_service_factory.cc
+index 4679c85e6de3a..d9160e3c576f2 100644
+--- a/chrome/browser/phlink/updater/updater_service_factory.cc
++++ b/chrome/browser/phlink/updater/updater_service_factory.cc
+@@ -4,29 +4,138 @@
+
+ #include "chrome/browser/phlink/updater/updater_service_factory.h"
+
++#include <memory>
++#include <string>
++#include <utility>
++#include <vector>
++
++#include "base/files/file_path.h"
++#include "base/files/file_util.h"
+ #include "base/functional/bind.h"
+ #include "base/logging.h"
++#include "base/memory/ref_counted.h"
+ #include "base/no_destructor.h"
++#include "base/path_service.h"
++#include "build/build_config.h"
+ #include "chrome/browser/browser_process.h"
++#include "chrome/browser/phlink/updater/update_check_pipeline.h"
+ #include "chrome/browser/phlink/updater/updater_service.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "components/prefs/pref_service.h"
++#include "content/public/browser/storage_partition.h"
++#include "services/network/public/cpp/shared_url_loader_factory.h"
++
++#ifndef PHLINK_PRODUCT_VERSION
++#define PHLINK_PRODUCT_VERSION "0.0.0"
++#endif
+
+ namespace phlink::updater {
+
+ namespace {
+
+-// No-op production CheckCallback. Phase 10-06b will replace this with
+-// `UpdateCheckPipeline::Run` once the settings WebUI handler is in
+-// place; the pipeline + helpers already exist (10-02e / 10-03 / 04 /
+-// 05) but binding them at factory time would require a profile-scoped
+-// SharedURLLoaderFactory and trust-pinned root.json which we don't
+-// want to plumb until there's a user-visible "Check for updates"
+-// button.
+-void NoopCheck() {
+-  VLOG(1) << "phlink updater: scheduled tick (no-op stub).";
++constexpr char kMetadataBaseUrl[] = "https://updates.phlink.dev/metadata/";
++constexpr char kPayloadBaseUrl[] = "https://updates.phlink.dev/payloads/";
++constexpr char kChannel[] = "stable";
++
++std::string TargetPlatform() {
++#if BUILDFLAG(IS_MAC)
++  return "mac";
++#elif BUILDFLAG(IS_LINUX)
++  return "linux";
++#elif BUILDFLAG(IS_WIN)
++  return "win";
++#else
++  return "unknown";
++#endif
++}
++
++std::string TargetArch() {
++#if BUILDFLAG(IS_WIN) && defined(ARCH_CPU_X86_64)
++  return "x64";
++#elif defined(ARCH_CPU_X86_64)
++  return "x86_64";
++#elif defined(ARCH_CPU_ARM64)
++  return "arm64";
++#else
++  return "unknown";
++#endif
+ }
+
++std::vector<uint8_t> ReadTrustRoot() {
++  base::FilePath exe_dir;
++  if (!base::PathService::Get(base::DIR_EXE, &exe_dir)) {
++    return {};
++  }
++  const base::FilePath root_paths[] = {
++      exe_dir.AppendASCII("resources")
++          .AppendASCII("phlink")
++          .AppendASCII("keys")
++          .AppendASCII("root.json"),
++      exe_dir.DirName()
++          .AppendASCII("Resources")
++          .AppendASCII("phlink")
++          .AppendASCII("keys")
++          .AppendASCII("root.json"),
++  };
++  for (const base::FilePath& root_path : root_paths) {
++    std::string root_json;
++    if (base::ReadFileToString(root_path, &root_json)) {
++      return std::vector<uint8_t>(root_json.begin(), root_json.end());
++    }
++  }
++  LOG(ERROR) << "phlink updater: trust root missing near " << exe_dir;
++  return {};
++}
++
++class UpdateCheckRunner : public base::RefCountedThreadSafe<UpdateCheckRunner> {
++ public:
++  UpdateCheckRunner(
++      base::FilePath profile_path,
++      scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory)
++      : profile_path_(std::move(profile_path)),
++        url_loader_factory_(std::move(url_loader_factory)) {}
++
++  void Check() {
++    if (pipeline_) {
++      VLOG(1) << "phlink updater: check already in progress.";
++      return;
++    }
++
++    UpdateCheckPipeline::Config config;
++    config.root_json = ReadTrustRoot();
++    if (config.root_json.empty()) {
++      return;
++    }
++    config.metadata_base_url = GURL(kMetadataBaseUrl);
++    config.payload_base_url = GURL(kPayloadBaseUrl);
++    config.current_version = PHLINK_PRODUCT_VERSION;
++    config.target_platform = TargetPlatform();
++    config.target_arch = TargetArch();
++    config.channel = kChannel;
++    config.staging_dir = profile_path_.AppendASCII("Phlink Updates");
++
++    pipeline_ = std::make_unique<UpdateCheckPipeline>(url_loader_factory_,
++                                                      std::move(config));
++    pipeline_->Run(base::BindOnce(&UpdateCheckRunner::OnPipelineFinished,
++                                  base::RetainedRef(this)));
++  }
++
++ private:
++  friend class base::RefCountedThreadSafe<UpdateCheckRunner>;
++
++  ~UpdateCheckRunner() = default;
++
++  void OnPipelineFinished(UpdateCheckPipeline::Outcome outcome) {
++    VLOG(1) << "phlink updater: update check finished with outcome "
++            << static_cast<int>(outcome);
++    pipeline_.reset();
++  }
++
++  const base::FilePath profile_path_;
++  scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory_;
++  std::unique_ptr<UpdateCheckPipeline> pipeline_;
++};
++
+ }  // namespace
+
+ // static
+@@ -65,8 +174,14 @@ UpdaterServiceFactory::BuildServiceInstanceForBrowserContext(
+   if (!local_state) {
+     return nullptr;
+   }
++  Profile* profile = Profile::FromBrowserContext(context);
++  scoped_refptr<UpdateCheckRunner> runner =
++      base::MakeRefCounted<UpdateCheckRunner>(
++          profile->GetPath(), profile->GetDefaultStoragePartition()
++                                  ->GetURLLoaderFactoryForBrowserProcess());
+   auto service = std::make_unique<UpdaterService>(
+-      local_state, base::BindRepeating(&NoopCheck));
++      local_state,
++      base::BindRepeating(&UpdateCheckRunner::Check, std::move(runner)));
+   service->Start();
+   return service;
+ }
+@@ -80,10 +195,7 @@ void UpdaterServiceFactory::RegisterProfilePrefs(
+ }
+
+ bool UpdaterServiceFactory::ServiceIsCreatedWithBrowserContext() const {
+-  // Lazy: only built when GetForProfile() is called. The settings WebUI
+-  // handler will trigger that the first time a user opens the Help
+-  // page.
+-  return false;
++  return true;
+ }
+
+ }  // namespace phlink::updater
+--
+2.50.1 (Apple Git-155)

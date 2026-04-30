@@ -9,6 +9,18 @@ on:
       chromium_run_id:
         description: Workflow run ID containing prebuilt out/Default artifacts
         required: true
+      chromium_expected_workflow_path:
+        description: Workflow path that produced chromium_run_id
+        required: true
+      chromium_expected_head_sha:
+        description: Git commit SHA that chromium_run_id must have built
+        required: true
+      chromium_expected_ref:
+        description: Branch or tag ref name that chromium_run_id must have built
+        required: true
+      mac_signing_identity:
+        description: Developer ID Application identity used for macOS release signing
+        required: false
       mac_artifact:
         description: macOS out/Default artifact name
         required: false
@@ -21,6 +33,12 @@ on:
         description: Windows out/Default artifact name
         required: false
         default: phlink-windows-out
+      appimagetool_url:
+        description: Immutable appimagetool release asset URL
+        required: false
+      appimagetool_sha256:
+        description: SHA-256 of appimagetool_url
+        required: false
 
 permissions:
   actions: read
@@ -31,9 +49,76 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  validate-chromium-run:
+    name: validate Chromium build provenance
+    runs-on: ubuntu-22.04
+    outputs:
+      run_id: ${{ steps.validate.outputs.run_id }}
+      workflow_path: ${{ steps.validate.outputs.workflow_path }}
+      head_sha: ${{ steps.validate.outputs.head_sha }}
+      head_branch: ${{ steps.validate.outputs.head_branch }}
+      repository: ${{ steps.validate.outputs.repository }}
+    steps:
+      - name: Validate Chromium build run provenance
+        id: validate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.chromium_run_id }}
+          EXPECTED_WORKFLOW_PATH: ${{ inputs.chromium_expected_workflow_path }}
+          EXPECTED_HEAD_SHA: ${{ inputs.chromium_expected_head_sha }}
+          EXPECTED_REF: ${{ inputs.chromium_expected_ref }}
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+        run: |
+          gh api "repos/${EXPECTED_REPOSITORY}/actions/runs/${RUN_ID}" > "$RUNNER_TEMP/chromium-run.json"
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          with open(os.path.join(os.environ["RUNNER_TEMP"], "chromium-run.json")) as f:
+              run = json.load(f)
+
+          expected_repo = os.environ["EXPECTED_REPOSITORY"].lower()
+          errors = []
+          if run.get("conclusion") != "success":
+              errors.append(f"conclusion is {run.get('conclusion')!r}")
+          if run.get("path") != os.environ["EXPECTED_WORKFLOW_PATH"]:
+              errors.append(
+                  f"workflow path is {run.get('path')!r}, "
+                  f"expected {os.environ['EXPECTED_WORKFLOW_PATH']!r}"
+              )
+          if run.get("head_sha") != os.environ["EXPECTED_HEAD_SHA"]:
+              errors.append(
+                  f"head_sha is {run.get('head_sha')!r}, "
+                  f"expected {os.environ['EXPECTED_HEAD_SHA']!r}"
+              )
+          if run.get("head_branch") != os.environ["EXPECTED_REF"]:
+              errors.append(
+                  f"head_branch is {run.get('head_branch')!r}, "
+                  f"expected {os.environ['EXPECTED_REF']!r}"
+              )
+          repo = (run.get("repository") or {}).get("full_name", "").lower()
+          if repo != expected_repo:
+              errors.append(f"repository is {repo!r}, expected {expected_repo!r}")
+
+          if errors:
+              print("Chromium build run provenance validation failed:", file=sys.stderr)
+              for error in errors:
+                  print(f"  - {error}", file=sys.stderr)
+              sys.exit(1)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              print(f"run_id={run['id']}", file=out)
+              print(f"workflow_path={run['path']}", file=out)
+              print(f"head_sha={run['head_sha']}", file=out)
+              print(f"head_branch={run['head_branch']}", file=out)
+              print(f"repository={(run.get('repository') or {}).get('full_name', '')}", file=out)
+          PY
+
   macos:
     name: package macOS dmg
     if: inputs.mac_artifact != ''
+    needs: validate-chromium-run
     runs-on: macos-14
     steps:
       - name: Checkout
@@ -46,21 +131,159 @@ jobs:
           ARTIFACT: ${{ inputs.mac_artifact }}
         run: gh run download "$RUN_ID" --name "$ARTIFACT" --dir "$RUNNER_TEMP/out"
 
+      - name: Import Developer ID certificate
+        env:
+          MAC_CERTIFICATE_P12: ${{ secrets.PHLINK_MACOS_DEVELOPER_ID_P12 }}
+          MAC_CERTIFICATE_PASSWORD: ${{ secrets.PHLINK_MACOS_DEVELOPER_ID_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.PHLINK_MACOS_KEYCHAIN_PASSWORD }}
+        run: |
+          test -n "$MAC_CERTIFICATE_P12"
+          test -n "$MAC_CERTIFICATE_PASSWORD"
+          test -n "$KEYCHAIN_PASSWORD"
+          KEYCHAIN_PATH="$RUNNER_TEMP/phlink-signing.keychain-db"
+          printf '%s' "$MAC_CERTIFICATE_P12" | base64 -D > "$RUNNER_TEMP/developer-id.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$RUNNER_TEMP/developer-id.p12" -P "$MAC_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -s \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
       - name: Build dmg
         env:
           VERSION: ${{ inputs.version }}
-        run: installers/mac/build-dmg.sh "$RUNNER_TEMP/out" "$VERSION"
+          MAC_SIGNING_IDENTITY: ${{ inputs.mac_signing_identity }}
+        run: |
+          test -n "$MAC_SIGNING_IDENTITY"
+          installers/mac/build-dmg.sh "$RUNNER_TEMP/out" "$VERSION" "$MAC_SIGNING_IDENTITY"
+
+      - name: Notarize and verify macOS artifacts
+        env:
+          VERSION: ${{ inputs.version }}
+          APPLE_ID: ${{ secrets.PHLINK_APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.PHLINK_APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.PHLINK_APPLE_TEAM_ID }}
+        run: |
+          test -n "$APPLE_ID"
+          test -n "$APPLE_APP_PASSWORD"
+          test -n "$APPLE_TEAM_ID"
+          DMG="dist/phlink-${VERSION}-mac-arm64.dmg"
+          ZIP="dist/phlink-${VERSION}-mac-arm64-update.zip"
+          xcrun notarytool submit "$DMG" --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
+          xcrun notarytool submit "$ZIP" --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
+          xcrun stapler staple "$DMG"
+          codesign --verify --strict --verbose=2 "$DMG"
+          spctl --assess --type open --context context:primary-signature --verbose "$DMG"
+          rm -rf "$RUNNER_TEMP/mac-update-verify"
+          mkdir -p "$RUNNER_TEMP/mac-update-verify"
+          ditto -x -k "$ZIP" "$RUNNER_TEMP/mac-update-verify"
+          codesign --verify --deep --strict --verbose=2 \
+            "$RUNNER_TEMP/mac-update-verify/phlink.app"
+          spctl --assess --type execute --verbose \
+            "$RUNNER_TEMP/mac-update-verify/phlink.app"
+
+      - name: Write macOS package provenance
+        env:
+          VERSION: ${{ inputs.version }}
+          PACKAGE_RUN_ID: ${{ github.run_id }}
+          CHROMIUM_RUN_ID: ${{ needs.validate-chromium-run.outputs.run_id }}
+          CHROMIUM_WORKFLOW_PATH: ${{ needs.validate-chromium-run.outputs.workflow_path }}
+          CHROMIUM_HEAD_SHA: ${{ needs.validate-chromium-run.outputs.head_sha }}
+          CHROMIUM_REF: ${{ needs.validate-chromium-run.outputs.head_branch }}
+          CHROMIUM_REPOSITORY: ${{ needs.validate-chromium-run.outputs.repository }}
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+
+          def sha256_file(path):
+              h = hashlib.sha256()
+              with open(path, "rb") as f:
+                  for chunk in iter(lambda: f.read(1 << 20), b""):
+                      h.update(chunk)
+              return h.hexdigest()
+
+          def read_gn_args(path):
+              values = {}
+              with open(path) as f:
+                  for raw in f:
+                      line = raw.split("#", 1)[0].strip()
+                      if not line or "=" not in line:
+                          continue
+                      key, value = [part.strip() for part in line.split("=", 1)]
+                      if value.startswith('"') and value.endswith('"'):
+                          value = value[1:-1]
+                      elif value in ("true", "false"):
+                          value = value == "true"
+                      values[key] = value
+              return values
+
+          def updater_build_metadata(out_dir, expected_version):
+              args = read_gn_args(os.path.join(out_dir, "args.gn"))
+              if args.get("phlink_updater_dev_root", True) is not False:
+                  raise SystemExit("release packaging requires phlink_updater_dev_root=false")
+              product_version = args.get("phlink_product_version")
+              if product_version != expected_version:
+                  raise SystemExit(
+                      f"phlink_product_version {product_version!r} does not match {expected_version!r}"
+                  )
+              root_path = os.path.join(out_dir, "resources", "phlink", "keys", "root.json")
+              return {
+                  "updater_root_sha256": sha256_file(root_path),
+                  "phlink_product_version": product_version,
+                  "phlink_updater_dev_root": False,
+              }
+
+          version = os.environ["VERSION"]
+          paths = [
+              f"dist/phlink-{version}-mac-arm64.dmg",
+              f"dist/phlink-{version}-mac-arm64-update.zip",
+          ]
+          artifacts = {}
+          for path in paths:
+              artifacts[os.path.basename(path)] = sha256_file(path)
+          manifest = {
+              "platform": "macos",
+              "package_run_id": os.environ["PACKAGE_RUN_ID"],
+              **updater_build_metadata(os.path.join(os.environ["RUNNER_TEMP"], "out"), version),
+              "chromium_run": {
+                  "id": os.environ["CHROMIUM_RUN_ID"],
+                  "workflow_path": os.environ["CHROMIUM_WORKFLOW_PATH"],
+                  "head_sha": os.environ["CHROMIUM_HEAD_SHA"],
+                  "ref": os.environ["CHROMIUM_REF"],
+                  "repository": os.environ["CHROMIUM_REPOSITORY"],
+              },
+              "platform_signing": {
+                  "codesign_verified": True,
+                  "gatekeeper_verified": True,
+                  "notarization_checked": True,
+              },
+              "artifacts": artifacts,
+          }
+          with open("dist/package-provenance-macos.json", "w") as f:
+              json.dump(manifest, f, indent=2, sort_keys=True)
+              f.write("\n")
+          PY
 
       - name: Upload dmg
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: phlink-${{ inputs.version }}-mac-installer
-          path: dist/*.dmg
+          path: |
+            dist/*.dmg
+            dist/*-mac-arm64-update.zip
+            dist/package-provenance-macos.json
           if-no-files-found: error
 
   linux:
     name: package Linux artifacts
     if: inputs.linux_artifact != ''
+    needs: validate-chromium-run
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
@@ -74,22 +297,127 @@ jobs:
         run: gh run download "$RUN_ID" --name "$ARTIFACT" --dir "$RUNNER_TEMP/out"
 
       - name: Install packaging tools
+        env:
+          APPIMAGETOOL_URL: ${{ inputs.appimagetool_url }}
+          APPIMAGETOOL_SHA256: ${{ inputs.appimagetool_sha256 }}
         run: |
           sudo apt-get update
           sudo apt-get install -y ruby ruby-dev rpm squashfs-tools
           sudo gem install --no-document fpm
-          curl -fsSL -o "$RUNNER_TEMP/appimagetool" \
-            https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          test -n "$APPIMAGETOOL_URL"
+          test -n "$APPIMAGETOOL_SHA256"
+          case "$APPIMAGETOOL_URL" in
+            https://*) ;;
+            *) echo "appimagetool_url must use https" >&2; exit 1 ;;
+          esac
+          curl -fsSL -o "$RUNNER_TEMP/appimagetool" "$APPIMAGETOOL_URL"
+          printf '%s  %s\n' "$APPIMAGETOOL_SHA256" \
+            "$RUNNER_TEMP/appimagetool" | sha256sum -c -
           chmod +x "$RUNNER_TEMP/appimagetool"
           echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+
+      - name: Materialize Linux release public key
+        env:
+          PHLINK_GPG_PUBLIC: ${{ secrets.PHLINK_GPG_PUBLIC }}
+        run: |
+          test -n "$PHLINK_GPG_PUBLIC"
+          printf '%s' "$PHLINK_GPG_PUBLIC" > "$RUNNER_TEMP/release.gpg"
 
       - name: Build Linux installers
         env:
           APPIMAGE_EXTRACT_AND_RUN: '1'
           VERSION: ${{ inputs.version }}
+          PHLINK_RELEASE_GPG: ${{ runner.temp }}/release.gpg
         run: |
           installers/linux/build-appimage.sh "$RUNNER_TEMP/out" "$VERSION"
           installers/linux/build-packages.sh "$RUNNER_TEMP/out" "$VERSION"
+          cp "$RUNNER_TEMP/out/phlink" "dist/phlink-${VERSION}-linux-x86_64-update"
+
+      - name: Write Linux package provenance
+        env:
+          VERSION: ${{ inputs.version }}
+          PACKAGE_RUN_ID: ${{ github.run_id }}
+          CHROMIUM_RUN_ID: ${{ needs.validate-chromium-run.outputs.run_id }}
+          CHROMIUM_WORKFLOW_PATH: ${{ needs.validate-chromium-run.outputs.workflow_path }}
+          CHROMIUM_HEAD_SHA: ${{ needs.validate-chromium-run.outputs.head_sha }}
+          CHROMIUM_REF: ${{ needs.validate-chromium-run.outputs.head_branch }}
+          CHROMIUM_REPOSITORY: ${{ needs.validate-chromium-run.outputs.repository }}
+          PHLINK_RELEASE_GPG: ${{ runner.temp }}/release.gpg
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+
+          def sha256_file(path):
+              h = hashlib.sha256()
+              with open(path, "rb") as f:
+                  for chunk in iter(lambda: f.read(1 << 20), b""):
+                      h.update(chunk)
+              return h.hexdigest()
+
+          def read_gn_args(path):
+              values = {}
+              with open(path) as f:
+                  for raw in f:
+                      line = raw.split("#", 1)[0].strip()
+                      if not line or "=" not in line:
+                          continue
+                      key, value = [part.strip() for part in line.split("=", 1)]
+                      if value.startswith('"') and value.endswith('"'):
+                          value = value[1:-1]
+                      elif value in ("true", "false"):
+                          value = value == "true"
+                      values[key] = value
+              return values
+
+          def updater_build_metadata(out_dir, expected_version):
+              args = read_gn_args(os.path.join(out_dir, "args.gn"))
+              if args.get("phlink_updater_dev_root", True) is not False:
+                  raise SystemExit("release packaging requires phlink_updater_dev_root=false")
+              product_version = args.get("phlink_product_version")
+              if product_version != expected_version:
+                  raise SystemExit(
+                      f"phlink_product_version {product_version!r} does not match {expected_version!r}"
+                  )
+              root_path = os.path.join(out_dir, "resources", "phlink", "keys", "root.json")
+              return {
+                  "updater_root_sha256": sha256_file(root_path),
+                  "phlink_product_version": product_version,
+                  "phlink_updater_dev_root": False,
+              }
+
+          version = os.environ["VERSION"]
+          paths = [
+              f"dist/phlink-{version}-linux-x86_64.AppImage",
+              f"dist/phlink-{version}-linux-x86_64-update",
+              f"dist/phlink_{version}_amd64.deb",
+              f"dist/phlink-{version}-1.x86_64.rpm",
+          ]
+          artifacts = {}
+          for path in paths:
+              artifacts[os.path.basename(path)] = sha256_file(path)
+          manifest = {
+              "platform": "linux",
+              "package_run_id": os.environ["PACKAGE_RUN_ID"],
+              **updater_build_metadata(os.path.join(os.environ["RUNNER_TEMP"], "out"), version),
+              "release_gpg_sha256": sha256_file(os.environ["PHLINK_RELEASE_GPG"]),
+              "chromium_run": {
+                  "id": os.environ["CHROMIUM_RUN_ID"],
+                  "workflow_path": os.environ["CHROMIUM_WORKFLOW_PATH"],
+                  "head_sha": os.environ["CHROMIUM_HEAD_SHA"],
+                  "ref": os.environ["CHROMIUM_REF"],
+                  "repository": os.environ["CHROMIUM_REPOSITORY"],
+              },
+              "platform_signing": {
+                  "detached_gpg_signing_deferred_to_release_sign": True,
+              },
+              "artifacts": artifacts,
+          }
+          with open("dist/package-provenance-linux.json", "w") as f:
+              json.dump(manifest, f, indent=2, sort_keys=True)
+              f.write("\n")
+          PY
 
       - name: Upload Linux installers
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -99,11 +427,14 @@ jobs:
             dist/*.AppImage
             dist/*.deb
             dist/*.rpm
+            dist/*-linux-x86_64-update
+            dist/package-provenance-linux.json
           if-no-files-found: error
 
   windows:
     name: package Windows msi
     if: inputs.windows_artifact != ''
+    needs: validate-chromium-run
     runs-on: windows-2022
     steps:
       - name: Checkout
@@ -121,15 +452,125 @@ jobs:
         shell: pwsh
         run: choco install wixtoolset --version=3.14.1 -y
 
+      - name: Materialize Windows signing certificate
+        shell: pwsh
+        env:
+          WINDOWS_SIGNING_CERT_PFX: ${{ secrets.PHLINK_WINDOWS_SIGNING_CERT_PFX }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERT_PFX)) {
+            throw "PHLINK_WINDOWS_SIGNING_CERT_PFX secret is required."
+          }
+          [IO.File]::WriteAllBytes(
+            "$env:RUNNER_TEMP\windows-signing.pfx",
+            [Convert]::FromBase64String($env:WINDOWS_SIGNING_CERT_PFX))
+
       - name: Build MSI
         shell: pwsh
         env:
           VERSION: ${{ inputs.version }}
-        run: installers/windows/build-msi.ps1 -OutDir "$env:RUNNER_TEMP\out" -Version "$env:VERSION"
+          WINDOWS_SIGNING_CERT_PASSWORD: ${{ secrets.PHLINK_WINDOWS_SIGNING_CERT_PASSWORD }}
+          WINDOWS_TIMESTAMP_URL: ${{ vars.PHLINK_WINDOWS_TIMESTAMP_URL || 'http://timestamp.digicert.com' }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERT_PASSWORD)) {
+            throw "PHLINK_WINDOWS_SIGNING_CERT_PASSWORD secret is required."
+          }
+          installers/windows/build-msi.ps1 `
+            -OutDir "$env:RUNNER_TEMP\out" `
+            -Version "$env:VERSION" `
+            -CertificatePath "$env:RUNNER_TEMP\windows-signing.pfx" `
+            -CertificatePassword "$env:WINDOWS_SIGNING_CERT_PASSWORD" `
+            -TimestampUrl "$env:WINDOWS_TIMESTAMP_URL"
+          Copy-Item "$env:RUNNER_TEMP\out\phlink.exe" "dist\phlink-$($env:VERSION)-win-x64-update.exe"
+
+      - name: Verify Windows package signatures
+        shell: pwsh
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" `
+              -Filter signtool.exe -Recurse -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if ($null -eq $signtool) { throw "signtool.exe not found." }
+          $paths = @(
+            "dist\phlink-$($env:VERSION)-win-x64.msi",
+            "dist\phlink-$($env:VERSION)-win-x64-update.exe"
+          )
+          foreach ($path in $paths) {
+            & $signtool.FullName verify /pa /v $path
+            if ($LASTEXITCODE -ne 0) { throw "signtool verify failed for $path" }
+          }
+
+      - name: Write Windows package provenance
+        shell: pwsh
+        env:
+          VERSION: ${{ inputs.version }}
+          PACKAGE_RUN_ID: ${{ github.run_id }}
+          CHROMIUM_RUN_ID: ${{ needs.validate-chromium-run.outputs.run_id }}
+          CHROMIUM_WORKFLOW_PATH: ${{ needs.validate-chromium-run.outputs.workflow_path }}
+          CHROMIUM_HEAD_SHA: ${{ needs.validate-chromium-run.outputs.head_sha }}
+          CHROMIUM_REF: ${{ needs.validate-chromium-run.outputs.head_branch }}
+          CHROMIUM_REPOSITORY: ${{ needs.validate-chromium-run.outputs.repository }}
+        run: |
+          $paths = @(
+            "dist\phlink-$($env:VERSION)-win-x64.msi",
+            "dist\phlink-$($env:VERSION)-win-x64-update.exe"
+          )
+          $artifacts = [ordered]@{}
+          foreach ($path in $paths) {
+            $artifacts[(Split-Path -Leaf $path)] = (Get-FileHash -Algorithm SHA256 $path).Hash.ToLowerInvariant()
+          }
+          function Read-GnArgs([string]$Path) {
+            $values = @{}
+            foreach ($raw in Get-Content $Path) {
+              $line = ($raw -split '#', 2)[0].Trim()
+              if ([string]::IsNullOrWhiteSpace($line) -or -not $line.Contains('=')) { continue }
+              $parts = $line -split '=', 2
+              $key = $parts[0].Trim()
+              $value = $parts[1].Trim()
+              if ($value.StartsWith('"') -and $value.EndsWith('"')) {
+                $value = $value.Substring(1, $value.Length - 2)
+              }
+              $values[$key] = $value
+            }
+            return $values
+          }
+          $buildArgs = Read-GnArgs "$env:RUNNER_TEMP\out\args.gn"
+          if ($buildArgs['phlink_updater_dev_root'] -ne 'false') {
+            throw "release packaging requires phlink_updater_dev_root=false"
+          }
+          if ($buildArgs['phlink_product_version'] -ne $env:VERSION) {
+            throw "phlink_product_version $($buildArgs['phlink_product_version']) does not match $env:VERSION"
+          }
+          $rootPath = "$env:RUNNER_TEMP\out\resources\phlink\keys\root.json"
+          if (-not (Test-Path $rootPath)) { throw "updater root not found at $rootPath" }
+          $manifest = [ordered]@{
+            platform = "windows"
+            package_run_id = $env:PACKAGE_RUN_ID
+            updater_root_sha256 = (Get-FileHash -Algorithm SHA256 $rootPath).Hash.ToLowerInvariant()
+            phlink_product_version = $buildArgs['phlink_product_version']
+            phlink_updater_dev_root = $false
+            chromium_run = [ordered]@{
+              id = $env:CHROMIUM_RUN_ID
+              workflow_path = $env:CHROMIUM_WORKFLOW_PATH
+              head_sha = $env:CHROMIUM_HEAD_SHA
+              ref = $env:CHROMIUM_REF
+              repository = $env:CHROMIUM_REPOSITORY
+            }
+            platform_signing = [ordered]@{
+              authenticode_verified = $true
+            }
+            artifacts = $artifacts
+          }
+          $manifest | ConvertTo-Json -Depth 5 | Out-File `
+            -FilePath "dist\package-provenance-windows.json" -Encoding utf8
 
       - name: Upload MSI
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: phlink-${{ inputs.version }}-windows-installer
-          path: dist/*.msi
+          path: |
+            dist/*.msi
+            dist/*-win-x64-update.exe
+            dist/package-provenance-windows.json
           if-no-files-found: error
