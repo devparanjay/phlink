@@ -1,0 +1,397 @@
+{
+  "outputComponents": [
+    {
+      "designSystem": {
+        "designSystem": {
+          "displayName": "Phlink Browser Design System",
+          "styleGuidelines": "## Brand & Style\nThis design system prioritizes a \"recessive\" aesthetic, ensuring the browser interface disappears to prioritize user content while maintaining a sense of privacy and calm. The style is rooted in **Minimalism** and **Corporate/Modern** influences, mimicking native Chromium architecture. By avoiding expressive brand elements like shadows or gradients, the UI feels like a dependable utility. The interface is characterized by flat tonal planes, crisp hairlines, and a muted, airy palette that evokes trust and technical precision.\n\n## Layout & Spacing\nThe layout follows a **Fluid Grid** model, with the main content area expanding to fill available viewport space while the sidebar maintains a fixed width. A 4px/8px baseline grid governs all internal spacing. Margins are generous to prevent the UI from feeling \"cramped,\" reinforcing the calm personality. Structural elements are separated by 1px hairlines rather than whitespace alone to ensure clear mental mapping of the browser's functional regions.\n\n## Elevation & Depth\nThis design system intentionally eschews all drop shadows. Depth is communicated exclusively through **Tonal Layers** and **Low-Contrast Outlines**. The background (#FFFFFF) represents the highest/closest layer (the page), while the sidebar (#F8F4EC) sits \"below\" or \"behind\" it as the frame. Overlays, such as menus or tooltips, should be defined by a 1px hairline border (#E5E0D6) against the background, relying on color contrast rather than shadow to indicate a change in Z-index.\n\n## Components\n- **Sidebar Pills:** Active states must use a background of #A8C8E8 at 30% opacity with #1A1A1A text. The shape is a full pill.\n- **Toggles:** Use a 4px corner radius. The \"on\" state utilizes the #A8C8E8 accent color. There is no shadow on the toggle switch itself.\n- **Buttons:** Primary buttons are flat, using the accent color or a subtle light-grey fill. Text is always #1A1A1A. Hover states should only involve a slight darken of the background or a 1px stroke.\n- **Input Fields:** Styled as \"ghost\" inputs or defined by a #E5E0D6 bottom hairline. On focus, the border or focus ring transitions to #A8C8E8.\n- **Cards:** 8px radius with a 1px #E5E0D6 border. No background fill difference unless the card is nested on a white surface.\n- **Checkboxes/Radios:** Use 4px radius for checkboxes and full circles for radios, utilizing #A8C8E8 for the checked state.",
+          "theme": {
+            "bodyFont": "INTER",
+            "colorMode": "LIGHT",
+            "colorVariant": "FIDELITY",
+            "customColor": "#1A1A1A",
+            "designMd": "---\nname: Phlink Browser Design System\ncolors:\n  surface: '#fdf8f8'\n  surface-dim: '#ddd9d8'\n  surface-bright: '#fdf8f8'\n  surface-container-lowest: '#ffffff'\n  surface-container-low: '#f7f3f2'\n  surface-container: '#f1edec'\n  surface-container-high: '#ebe7e6'\n  surface-container-highest: '#e5e2e1'\n  on-surface: '#1c1b1b'\n  on-surface-variant: '#444748'\n  inverse-surface: '#313030'\n  inverse-on-surface: '#f4f0ef'\n  outline: '#747878'\n  outline-variant: '#c4c7c7'\n  surface-tint: '#5f5e5e'\n  primary: '#000000'\n  on-primary: '#ffffff'\n  primary-container: '#1c1b1b'\n  on-primary-container: '#858383'\n  inverse-primary: '#c8c6c5'\n  secondary: '#5e5e5e'\n  on-secondary: '#ffffff'\n  secondary-container: '#e4e2e2'\n  on-secondary-container: '#646464'\n  tertiary: '#000000'\n  on-tertiary: '#ffffff'\n  tertiary-container: '#1c1b1a'\n  on-tertiary-container: '#868382'\n  error: '#ba1a1a'\n  on-error: '#ffffff'\n  error-container: '#ffdad6'\n  on-error-container: '#93000a'\n  primary-fixed: '#e5e2e1'\n  primary-fixed-dim: '#c8c6c5'\n  on-primary-fixed: '#1c1b1b'\n  on-primary-fixed-variant: '#474746'\n  secondary-fixed: '#e4e2e2'\n  secondary-fixed-dim: '#c8c6c6'\n  on-secondary-fixed: '#1b1c1c'\n  on-secondary-fixed-variant: '#474747'\n  tertiary-fixed: '#e6e2df'\n  tertiary-fixed-dim: '#cac6c4'\n  on-tertiary-fixed: '#1c1b1a'\n  on-tertiary-fixed-variant: '#484645'\n  background: '#fdf8f8'\n  on-background: '#1c1b1b'\n  surface-variant: '#e5e2e1'\ntypography:\n  display-sm:\n    fontFamily: Inter\n    fontSize: 20px\n    fontWeight: '600'\n    lineHeight: 28px\n    letterSpacing: -0.01em\n  body-md:\n    fontFamily: Inter\n    fontSize: 14px\n    fontWeight: '400'\n    lineHeight: 20px\n    letterSpacing: '0'\n  body-sm:\n    fontFamily: Inter\n    fontSize: 13px\n    fontWeight: '400'\n    lineHeight: 18px\n    letterSpacing: '0'\n  label-md:\n    fontFamily: Inter\n    fontSize: 12px\n    fontWeight: '500'\n    lineHeight: 16px\n    letterSpacing: 0.02em\n  label-sm:\n    fontFamily: Inter\n    fontSize: 11px\n    fontWeight: '600'\n    lineHeight: 14px\n    letterSpacing: 0.03em\nrounded:\n  sm: 0.125rem\n  DEFAULT: 0.25rem\n  md: 0.375rem\n  lg: 0.5rem\n  xl: 0.75rem\n  full: 9999px\nspacing:\n  base: 4px\n  xs: 4px\n  sm: 8px\n  md: 16px\n  lg: 24px\n  xl: 32px\n  sidebar-width: 260px\n  gutter: 12px\n---\n\n## Brand & Style\nThis design system prioritizes a \"recessive\" aesthetic, ensuring the browser interface disappears to prioritize user content while maintaining a sense of privacy and calm. The style is rooted in **Minimalism** and **Corporate/Modern** influences, mimicking native Chromium architecture. By avoiding expressive brand elements like shadows or gradients, the UI feels like a dependable utility. The interface is characterized by flat tonal planes, crisp hairlines, and a muted, airy palette that evokes trust and technical precision.\n\n## Colors\nThe palette is designed for high legibility and low visual fatigue. The primary surface is pure white to maximize content clarity, contrasted against a warm, bone-colored sidebar (#F8F4EC) that signals a separate functional zone. The accent color (#A8C8E8) is reserved strictly for interactive feedback—focus rings, toggles, and selection states—ensuring it remains a functional signifier rather than a decorative element. Hairlines (#E5E0D6) provide structural definition without the weight of traditional borders.\n\n## Typography\nThe typography utilizes **Inter** to achieve a neutral, utilitarian \"system sans-serif\" feel. Scale is kept tight and disciplined, reflecting native OS patterns rather than web-marketing aesthetics. Body text is set at 14px for optimal readability, while labels and secondary metadata drop to 12px or 11px to maintain hierarchy. Weight is used sparingly—primarily 400 for content and 500/600 for UI headers—to keep the interface feeling light and unencumbered.\n\n## Layout & Spacing\nThe layout follows a **Fluid Grid** model, with the main content area expanding to fill available viewport space while the sidebar maintains a fixed width. A 4px/8px baseline grid governs all internal spacing. Margins are generous to prevent the UI from feeling \"cramped,\" reinforcing the calm personality. Structural elements are separated by 1px hairlines rather than whitespace alone to ensure clear mental mapping of the browser's functional regions.\n\n## Elevation & Depth\nThis design system intentionally eschews all drop shadows. Depth is communicated exclusively through **Tonal Layers** and **Low-Contrast Outlines**. The background (#FFFFFF) represents the highest/closest layer (the page), while the sidebar (#F8F4EC) sits \"below\" or \"behind\" it as the frame. Overlays, such as menus or tooltips, should be defined by a 1px hairline border (#E5E0D6) against the background, relying on color contrast rather than shadow to indicate a change in Z-index.\n\n## Shapes\nThe shape language is precise and geometric. While the system uses a base \"Soft\" rounding, specific radii are enforced for consistency: 8px for containers and cards to provide a modern yet structured feel, and 4px for smaller interactive components like toggles and checkboxes to maintain a technical \"tool-like\" appearance. Interactive \"pills\" used for navigation or tagging use a fully rounded (100px) radius to differentiate them from structural containers.\n\n## Components\n- **Sidebar Pills:** Active states must use a background of #A8C8E8 at 30% opacity with #1A1A1A text. The shape is a full pill.\n- **Toggles:** Use a 4px corner radius. The \"on\" state utilizes the #A8C8E8 accent color. There is no shadow on the toggle switch itself.\n- **Buttons:** Primary buttons are flat, using the accent color or a subtle light-grey fill. Text is always #1A1A1A. Hover states should only involve a slight darken of the background or a 1px stroke.\n- **Input Fields:** Styled as \"ghost\" inputs or defined by a #E5E0D6 bottom hairline. On focus, the border or focus ring transitions to #A8C8E8.\n- **Cards:** 8px radius with a 1px #E5E0D6 border. No background fill difference unless the card is nested on a white surface.\n- **Checkboxes/Radios:** Use 4px radius for checkboxes and full circles for radios, utilizing #A8C8E8 for the checked state.",
+            "font": "INTER",
+            "headlineFont": "INTER",
+            "labelFont": "INTER",
+            "namedColors": {
+              "background": "#fdf8f8",
+              "error": "#ba1a1a",
+              "error_container": "#ffdad6",
+              "inverse_on_surface": "#f4f0ef",
+              "inverse_primary": "#c8c6c5",
+              "inverse_surface": "#313030",
+              "on_background": "#1c1b1b",
+              "on_error": "#ffffff",
+              "on_error_container": "#93000a",
+              "on_primary": "#ffffff",
+              "on_primary_container": "#858383",
+              "on_primary_fixed": "#1c1b1b",
+              "on_primary_fixed_variant": "#474746",
+              "on_secondary": "#ffffff",
+              "on_secondary_container": "#646464",
+              "on_secondary_fixed": "#1b1c1c",
+              "on_secondary_fixed_variant": "#474747",
+              "on_surface": "#1c1b1b",
+              "on_surface_variant": "#444748",
+              "on_tertiary": "#ffffff",
+              "on_tertiary_container": "#868382",
+              "on_tertiary_fixed": "#1c1b1a",
+              "on_tertiary_fixed_variant": "#484645",
+              "outline": "#747878",
+              "outline_variant": "#c4c7c7",
+              "primary": "#000000",
+              "primary_container": "#1c1b1b",
+              "primary_fixed": "#e5e2e1",
+              "primary_fixed_dim": "#c8c6c5",
+              "secondary": "#5e5e5e",
+              "secondary_container": "#e4e2e2",
+              "secondary_fixed": "#e4e2e2",
+              "secondary_fixed_dim": "#c8c6c6",
+              "surface": "#fdf8f8",
+              "surface_bright": "#fdf8f8",
+              "surface_container": "#f1edec",
+              "surface_container_high": "#ebe7e6",
+              "surface_container_highest": "#e5e2e1",
+              "surface_container_low": "#f7f3f2",
+              "surface_container_lowest": "#ffffff",
+              "surface_dim": "#ddd9d8",
+              "surface_tint": "#5f5e5e",
+              "surface_variant": "#e5e2e1",
+              "tertiary": "#000000",
+              "tertiary_container": "#1c1b1a",
+              "tertiary_fixed": "#e6e2df",
+              "tertiary_fixed_dim": "#cac6c4"
+            },
+            "overridePrimaryColor": "#1A1A1A",
+            "overrideSecondaryColor": "#525252",
+            "roundness": "ROUND_FOUR",
+            "spacing": {
+              "base": "4px",
+              "gutter": "12px",
+              "lg": "24px",
+              "md": "16px",
+              "sidebar-width": "260px",
+              "sm": "8px",
+              "xl": "32px",
+              "xs": "4px"
+            },
+            "spacingScale": 2,
+            "typography": {
+              "body-md": {
+                "fontFamily": "Inter",
+                "fontSize": "14px",
+                "fontWeight": "400",
+                "letterSpacing": "0",
+                "lineHeight": "20px"
+              },
+              "body-sm": {
+                "fontFamily": "Inter",
+                "fontSize": "13px",
+                "fontWeight": "400",
+                "letterSpacing": "0",
+                "lineHeight": "18px"
+              },
+              "display-sm": {
+                "fontFamily": "Inter",
+                "fontSize": "20px",
+                "fontWeight": "600",
+                "letterSpacing": "-0.01em",
+                "lineHeight": "28px"
+              },
+              "label-md": {
+                "fontFamily": "Inter",
+                "fontSize": "12px",
+                "fontWeight": "500",
+                "letterSpacing": "0.02em",
+                "lineHeight": "16px"
+              },
+              "label-sm": {
+                "fontFamily": "Inter",
+                "fontSize": "11px",
+                "fontWeight": "600",
+                "letterSpacing": "0.03em",
+                "lineHeight": "14px"
+              }
+            }
+          }
+        },
+        "name": "assets/1d46bd9d5118431991cf9f0c68ffd39d",
+        "version": "1"
+      }
+    },
+    {
+      "design": {
+        "screens": [
+          {
+            "designSystem": {
+              "designSystem": {
+                "displayName": "Phlink Browser Design System",
+                "styleGuidelines": "## Brand & Style\nThis design system prioritizes a \"recessive\" aesthetic, ensuring the browser interface disappears to prioritize user content while maintaining a sense of privacy and calm. The style is rooted in **Minimalism** and **Corporate/Modern** influences, mimicking native Chromium architecture. By avoiding expressive brand elements like shadows or gradients, the UI feels like a dependable utility. The interface is characterized by flat tonal planes, crisp hairlines, and a muted, airy palette that evokes trust and technical precision.\n\n## Layout & Spacing\nThe layout follows a **Fluid Grid** model, with the main content area expanding to fill available viewport space while the sidebar maintains a fixed width. A 4px/8px baseline grid governs all internal spacing. Margins are generous to prevent the UI from feeling \"cramped,\" reinforcing the calm personality. Structural elements are separated by 1px hairlines rather than whitespace alone to ensure clear mental mapping of the browser's functional regions.\n\n## Elevation & Depth\nThis design system intentionally eschews all drop shadows. Depth is communicated exclusively through **Tonal Layers** and **Low-Contrast Outlines**. The background (#FFFFFF) represents the highest/closest layer (the page), while the sidebar (#F8F4EC) sits \"below\" or \"behind\" it as the frame. Overlays, such as menus or tooltips, should be defined by a 1px hairline border (#E5E0D6) against the background, relying on color contrast rather than shadow to indicate a change in Z-index.\n\n## Components\n- **Sidebar Pills:** Active states must use a background of #A8C8E8 at 30% opacity with #1A1A1A text. The shape is a full pill.\n- **Toggles:** Use a 4px corner radius. The \"on\" state utilizes the #A8C8E8 accent color. There is no shadow on the toggle switch itself.\n- **Buttons:** Primary buttons are flat, using the accent color or a subtle light-grey fill. Text is always #1A1A1A. Hover states should only involve a slight darken of the background or a 1px stroke.\n- **Input Fields:** Styled as \"ghost\" inputs or defined by a #E5E0D6 bottom hairline. On focus, the border or focus ring transitions to #A8C8E8.\n- **Cards:** 8px radius with a 1px #E5E0D6 border. No background fill difference unless the card is nested on a white surface.\n- **Checkboxes/Radios:** Use 4px radius for checkboxes and full circles for radios, utilizing #A8C8E8 for the checked state.",
+                "theme": {
+                  "bodyFont": "INTER",
+                  "colorMode": "LIGHT",
+                  "colorVariant": "FIDELITY",
+                  "customColor": "#1A1A1A",
+                  "designMd": "---\nname: Phlink Browser Design System\ncolors:\n  surface: '#fdf8f8'\n  surface-dim: '#ddd9d8'\n  surface-bright: '#fdf8f8'\n  surface-container-lowest: '#ffffff'\n  surface-container-low: '#f7f3f2'\n  surface-container: '#f1edec'\n  surface-container-high: '#ebe7e6'\n  surface-container-highest: '#e5e2e1'\n  on-surface: '#1c1b1b'\n  on-surface-variant: '#444748'\n  inverse-surface: '#313030'\n  inverse-on-surface: '#f4f0ef'\n  outline: '#747878'\n  outline-variant: '#c4c7c7'\n  surface-tint: '#5f5e5e'\n  primary: '#000000'\n  on-primary: '#ffffff'\n  primary-container: '#1c1b1b'\n  on-primary-container: '#858383'\n  inverse-primary: '#c8c6c5'\n  secondary: '#5e5e5e'\n  on-secondary: '#ffffff'\n  secondary-container: '#e4e2e2'\n  on-secondary-container: '#646464'\n  tertiary: '#000000'\n  on-tertiary: '#ffffff'\n  tertiary-container: '#1c1b1a'\n  on-tertiary-container: '#868382'\n  error: '#ba1a1a'\n  on-error: '#ffffff'\n  error-container: '#ffdad6'\n  on-error-container: '#93000a'\n  primary-fixed: '#e5e2e1'\n  primary-fixed-dim: '#c8c6c5'\n  on-primary-fixed: '#1c1b1b'\n  on-primary-fixed-variant: '#474746'\n  secondary-fixed: '#e4e2e2'\n  secondary-fixed-dim: '#c8c6c6'\n  on-secondary-fixed: '#1b1c1c'\n  on-secondary-fixed-variant: '#474747'\n  tertiary-fixed: '#e6e2df'\n  tertiary-fixed-dim: '#cac6c4'\n  on-tertiary-fixed: '#1c1b1a'\n  on-tertiary-fixed-variant: '#484645'\n  background: '#fdf8f8'\n  on-background: '#1c1b1b'\n  surface-variant: '#e5e2e1'\ntypography:\n  display-sm:\n    fontFamily: Inter\n    fontSize: 20px\n    fontWeight: '600'\n    lineHeight: 28px\n    letterSpacing: -0.01em\n  body-md:\n    fontFamily: Inter\n    fontSize: 14px\n    fontWeight: '400'\n    lineHeight: 20px\n    letterSpacing: '0'\n  body-sm:\n    fontFamily: Inter\n    fontSize: 13px\n    fontWeight: '400'\n    lineHeight: 18px\n    letterSpacing: '0'\n  label-md:\n    fontFamily: Inter\n    fontSize: 12px\n    fontWeight: '500'\n    lineHeight: 16px\n    letterSpacing: 0.02em\n  label-sm:\n    fontFamily: Inter\n    fontSize: 11px\n    fontWeight: '600'\n    lineHeight: 14px\n    letterSpacing: 0.03em\nrounded:\n  sm: 0.125rem\n  DEFAULT: 0.25rem\n  md: 0.375rem\n  lg: 0.5rem\n  xl: 0.75rem\n  full: 9999px\nspacing:\n  base: 4px\n  xs: 4px\n  sm: 8px\n  md: 16px\n  lg: 24px\n  xl: 32px\n  sidebar-width: 260px\n  gutter: 12px\n---\n\n## Brand & Style\nThis design system prioritizes a \"recessive\" aesthetic, ensuring the browser interface disappears to prioritize user content while maintaining a sense of privacy and calm. The style is rooted in **Minimalism** and **Corporate/Modern** influences, mimicking native Chromium architecture. By avoiding expressive brand elements like shadows or gradients, the UI feels like a dependable utility. The interface is characterized by flat tonal planes, crisp hairlines, and a muted, airy palette that evokes trust and technical precision.\n\n## Colors\nThe palette is designed for high legibility and low visual fatigue. The primary surface is pure white to maximize content clarity, contrasted against a warm, bone-colored sidebar (#F8F4EC) that signals a separate functional zone. The accent color (#A8C8E8) is reserved strictly for interactive feedback—focus rings, toggles, and selection states—ensuring it remains a functional signifier rather than a decorative element. Hairlines (#E5E0D6) provide structural definition without the weight of traditional borders.\n\n## Typography\nThe typography utilizes **Inter** to achieve a neutral, utilitarian \"system sans-serif\" feel. Scale is kept tight and disciplined, reflecting native OS patterns rather than web-marketing aesthetics. Body text is set at 14px for optimal readability, while labels and secondary metadata drop to 12px or 11px to maintain hierarchy. Weight is used sparingly—primarily 400 for content and 500/600 for UI headers—to keep the interface feeling light and unencumbered.\n\n## Layout & Spacing\nThe layout follows a **Fluid Grid** model, with the main content area expanding to fill available viewport space while the sidebar maintains a fixed width. A 4px/8px baseline grid governs all internal spacing. Margins are generous to prevent the UI from feeling \"cramped,\" reinforcing the calm personality. Structural elements are separated by 1px hairlines rather than whitespace alone to ensure clear mental mapping of the browser's functional regions.\n\n## Elevation & Depth\nThis design system intentionally eschews all drop shadows. Depth is communicated exclusively through **Tonal Layers** and **Low-Contrast Outlines**. The background (#FFFFFF) represents the highest/closest layer (the page), while the sidebar (#F8F4EC) sits \"below\" or \"behind\" it as the frame. Overlays, such as menus or tooltips, should be defined by a 1px hairline border (#E5E0D6) against the background, relying on color contrast rather than shadow to indicate a change in Z-index.\n\n## Shapes\nThe shape language is precise and geometric. While the system uses a base \"Soft\" rounding, specific radii are enforced for consistency: 8px for containers and cards to provide a modern yet structured feel, and 4px for smaller interactive components like toggles and checkboxes to maintain a technical \"tool-like\" appearance. Interactive \"pills\" used for navigation or tagging use a fully rounded (100px) radius to differentiate them from structural containers.\n\n## Components\n- **Sidebar Pills:** Active states must use a background of #A8C8E8 at 30% opacity with #1A1A1A text. The shape is a full pill.\n- **Toggles:** Use a 4px corner radius. The \"on\" state utilizes the #A8C8E8 accent color. There is no shadow on the toggle switch itself.\n- **Buttons:** Primary buttons are flat, using the accent color or a subtle light-grey fill. Text is always #1A1A1A. Hover states should only involve a slight darken of the background or a 1px stroke.\n- **Input Fields:** Styled as \"ghost\" inputs or defined by a #E5E0D6 bottom hairline. On focus, the border or focus ring transitions to #A8C8E8.\n- **Cards:** 8px radius with a 1px #E5E0D6 border. No background fill difference unless the card is nested on a white surface.\n- **Checkboxes/Radios:** Use 4px radius for checkboxes and full circles for radios, utilizing #A8C8E8 for the checked state.",
+                  "font": "INTER",
+                  "headlineFont": "INTER",
+                  "labelFont": "INTER",
+                  "namedColors": {
+                    "background": "#fdf8f8",
+                    "error": "#ba1a1a",
+                    "error_container": "#ffdad6",
+                    "inverse_on_surface": "#f4f0ef",
+                    "inverse_primary": "#c8c6c5",
+                    "inverse_surface": "#313030",
+                    "on_background": "#1c1b1b",
+                    "on_error": "#ffffff",
+                    "on_error_container": "#93000a",
+                    "on_primary": "#ffffff",
+                    "on_primary_container": "#858383",
+                    "on_primary_fixed": "#1c1b1b",
+                    "on_primary_fixed_variant": "#474746",
+                    "on_secondary": "#ffffff",
+                    "on_secondary_container": "#646464",
+                    "on_secondary_fixed": "#1b1c1c",
+                    "on_secondary_fixed_variant": "#474747",
+                    "on_surface": "#1c1b1b",
+                    "on_surface_variant": "#444748",
+                    "on_tertiary": "#ffffff",
+                    "on_tertiary_container": "#868382",
+                    "on_tertiary_fixed": "#1c1b1a",
+                    "on_tertiary_fixed_variant": "#484645",
+                    "outline": "#747878",
+                    "outline_variant": "#c4c7c7",
+                    "primary": "#000000",
+                    "primary_container": "#1c1b1b",
+                    "primary_fixed": "#e5e2e1",
+                    "primary_fixed_dim": "#c8c6c5",
+                    "secondary": "#5e5e5e",
+                    "secondary_container": "#e4e2e2",
+                    "secondary_fixed": "#e4e2e2",
+                    "secondary_fixed_dim": "#c8c6c6",
+                    "surface": "#fdf8f8",
+                    "surface_bright": "#fdf8f8",
+                    "surface_container": "#f1edec",
+                    "surface_container_high": "#ebe7e6",
+                    "surface_container_highest": "#e5e2e1",
+                    "surface_container_low": "#f7f3f2",
+                    "surface_container_lowest": "#ffffff",
+                    "surface_dim": "#ddd9d8",
+                    "surface_tint": "#5f5e5e",
+                    "surface_variant": "#e5e2e1",
+                    "tertiary": "#000000",
+                    "tertiary_container": "#1c1b1a",
+                    "tertiary_fixed": "#e6e2df",
+                    "tertiary_fixed_dim": "#cac6c4"
+                  },
+                  "overridePrimaryColor": "#1A1A1A",
+                  "overrideSecondaryColor": "#525252",
+                  "roundness": "ROUND_FOUR",
+                  "spacing": {
+                    "base": "4px",
+                    "gutter": "12px",
+                    "lg": "24px",
+                    "md": "16px",
+                    "sidebar-width": "260px",
+                    "sm": "8px",
+                    "xl": "32px",
+                    "xs": "4px"
+                  },
+                  "spacingScale": 2,
+                  "typography": {
+                    "body-md": {
+                      "fontFamily": "Inter",
+                      "fontSize": "14px",
+                      "fontWeight": "400",
+                      "letterSpacing": "0",
+                      "lineHeight": "20px"
+                    },
+                    "body-sm": {
+                      "fontFamily": "Inter",
+                      "fontSize": "13px",
+                      "fontWeight": "400",
+                      "letterSpacing": "0",
+                      "lineHeight": "18px"
+                    },
+                    "display-sm": {
+                      "fontFamily": "Inter",
+                      "fontSize": "20px",
+                      "fontWeight": "600",
+                      "letterSpacing": "-0.01em",
+                      "lineHeight": "28px"
+                    },
+                    "label-md": {
+                      "fontFamily": "Inter",
+                      "fontSize": "12px",
+                      "fontWeight": "500",
+                      "letterSpacing": "0.02em",
+                      "lineHeight": "16px"
+                    },
+                    "label-sm": {
+                      "fontFamily": "Inter",
+                      "fontSize": "11px",
+                      "fontWeight": "600",
+                      "letterSpacing": "0.03em",
+                      "lineHeight": "14px"
+                    }
+                  }
+                }
+              },
+              "name": "assets/1d46bd9d5118431991cf9f0c68ffd39d",
+              "version": "1"
+            },
+            "deviceType": "DESKTOP",
+            "generatedBy": "figaro_agent",
+            "height": "2048",
+            "htmlCode": {
+              "downloadUrl": "https://contribution.usercontent.google.com/download?c=CgthaWRhX2NvZGVmeBJ8Eh1hcHBfY29tcGFuaW9uX2dlbmVyYXRlZF9maWxlcxpbCiVodG1sX2EwM2RhNTM2ZDNjZTQ3YzRiN2E0NDA4OGZlMTI5YWYwEgsSBxCxnJywzAQYAZIBJAoKcHJvamVjdF9pZBIWQhQxMjk2MjQ4NzkxOTY3NTA5NDAyMw&filename=&opi=96797242",
+              "mimeType": "text/html",
+              "name": "projects/12962487919675094023/files/e128ad94a1e6419da1279b937522ec4a"
+            },
+            "id": "7049af473189487d840d1edbc5d82be7",
+            "name": "projects/12962487919675094023/screens/7049af473189487d840d1edbc5d82be7",
+            "prompt": "Design the \"Appearance\" settings page for phlink browser (desktop view).\n\nLayout:\n- TopNavBar: \"Settings\" title on left, centered search bar.\n- SideNavBar: Sidebar on left with #F8F4EC background. \"Appearance\" should be the active item with a light blue (#A8C8E8 at 30% opacity) pill background and #1A1A1A text.\n- Main Content: Appearance page sections.\n\nContent Sections:\n1. \"phlink theme\": Three radio cards (8px radius) in a row: \n   - Light (selected): 2px #A8C8E8 border, mini light browser preview graphic.\n   - Dark: Mini dark preview graphic.\n   - Follow system: Split light/dark preview.\n2. \"Show home button\": Row with title and toggle (off).\n3. \"Show bookmarks bar\": Row with title and toggle (off).\n4. \"Font size\": Row with title and dropdown showing \"Medium\".\n5. \"Customize fonts\": Row with title and a caret (chevron) link to the right.\n6. \"Page zoom\": Row with title and dropdown showing \"100%\".\n\nVisual Details:\n- Background: #FFFFFF.\n- Lines: #E5E0D6 hairlines between rows.\n- Text: #1A1A1A primary, #525252 secondary.\n- Radii: 8px for cards, 4px for toggles.\n- No drop shadows anywhere.\n- Pure Chromium-style UI, clean and utilitarian.",
+            "screenMetadata": {
+              "agentType": "PRO_AGENT",
+              "status": "COMPLETE"
+            },
+            "screenType": "DESIGN",
+            "screenshot": {
+              "downloadUrl": "https://lh3.googleusercontent.com/aida/ADBb0ujhFXtQLjDHcyGihKHUIskJlq0yNEqzmdDx6cX21NCJNVtQV6xwkN0tD-VML7D9PLLuFtafZ3Wj30fRwlzz4Za9DszCW1Z-GXiPtg4Z-OuruqjDaRIMMOG6iuODwOZNGczRXxnW8zSaNsrhkoL1cIxLCmS6EQwcIZKiSYvptkNyfwRjcwdwnAJqXXzvdb5A_6LeATp-DayByKOYfBwHFEqwTuz996xANLf1FjcPveeQ_7JhAnK44JS_HAhS",
+              "name": "projects/12962487919675094023/files/aef34e578a2d48de8b9c44d111a2cfed"
+            },
+            "theme": {
+              "bodyFont": "INTER",
+              "colorMode": "LIGHT",
+              "colorVariant": "FIDELITY",
+              "customColor": "#1A1A1A",
+              "designMd": "---\nname: Phlink Browser Design System\ncolors:\n  surface: '#fdf8f8'\n  surface-dim: '#ddd9d8'\n  surface-bright: '#fdf8f8'\n  surface-container-lowest: '#ffffff'\n  surface-container-low: '#f7f3f2'\n  surface-container: '#f1edec'\n  surface-container-high: '#ebe7e6'\n  surface-container-highest: '#e5e2e1'\n  on-surface: '#1c1b1b'\n  on-surface-variant: '#444748'\n  inverse-surface: '#313030'\n  inverse-on-surface: '#f4f0ef'\n  outline: '#747878'\n  outline-variant: '#c4c7c7'\n  surface-tint: '#5f5e5e'\n  primary: '#000000'\n  on-primary: '#ffffff'\n  primary-container: '#1c1b1b'\n  on-primary-container: '#858383'\n  inverse-primary: '#c8c6c5'\n  secondary: '#5e5e5e'\n  on-secondary: '#ffffff'\n  secondary-container: '#e4e2e2'\n  on-secondary-container: '#646464'\n  tertiary: '#000000'\n  on-tertiary: '#ffffff'\n  tertiary-container: '#1c1b1a'\n  on-tertiary-container: '#868382'\n  error: '#ba1a1a'\n  on-error: '#ffffff'\n  error-container: '#ffdad6'\n  on-error-container: '#93000a'\n  primary-fixed: '#e5e2e1'\n  primary-fixed-dim: '#c8c6c5'\n  on-primary-fixed: '#1c1b1b'\n  on-primary-fixed-variant: '#474746'\n  secondary-fixed: '#e4e2e2'\n  secondary-fixed-dim: '#c8c6c6'\n  on-secondary-fixed: '#1b1c1c'\n  on-secondary-fixed-variant: '#474747'\n  tertiary-fixed: '#e6e2df'\n  tertiary-fixed-dim: '#cac6c4'\n  on-tertiary-fixed: '#1c1b1a'\n  on-tertiary-fixed-variant: '#484645'\n  background: '#fdf8f8'\n  on-background: '#1c1b1b'\n  surface-variant: '#e5e2e1'\ntypography:\n  display-sm:\n    fontFamily: Inter\n    fontSize: 20px\n    fontWeight: '600'\n    lineHeight: 28px\n    letterSpacing: -0.01em\n  body-md:\n    fontFamily: Inter\n    fontSize: 14px\n    fontWeight: '400'\n    lineHeight: 20px\n    letterSpacing: '0'\n  body-sm:\n    fontFamily: Inter\n    fontSize: 13px\n    fontWeight: '400'\n    lineHeight: 18px\n    letterSpacing: '0'\n  label-md:\n    fontFamily: Inter\n    fontSize: 12px\n    fontWeight: '500'\n    lineHeight: 16px\n    letterSpacing: 0.02em\n  label-sm:\n    fontFamily: Inter\n    fontSize: 11px\n    fontWeight: '600'\n    lineHeight: 14px\n    letterSpacing: 0.03em\nrounded:\n  sm: 0.125rem\n  DEFAULT: 0.25rem\n  md: 0.375rem\n  lg: 0.5rem\n  xl: 0.75rem\n  full: 9999px\nspacing:\n  base: 4px\n  xs: 4px\n  sm: 8px\n  md: 16px\n  lg: 24px\n  xl: 32px\n  sidebar-width: 260px\n  gutter: 12px\n---\n\n## Brand & Style\nThis design system prioritizes a \"recessive\" aesthetic, ensuring the browser interface disappears to prioritize user content while maintaining a sense of privacy and calm. The style is rooted in **Minimalism** and **Corporate/Modern** influences, mimicking native Chromium architecture. By avoiding expressive brand elements like shadows or gradients, the UI feels like a dependable utility. The interface is characterized by flat tonal planes, crisp hairlines, and a muted, airy palette that evokes trust and technical precision.\n\n## Colors\nThe palette is designed for high legibility and low visual fatigue. The primary surface is pure white to maximize content clarity, contrasted against a warm, bone-colored sidebar (#F8F4EC) that signals a separate functional zone. The accent color (#A8C8E8) is reserved strictly for interactive feedback—focus rings, toggles, and selection states—ensuring it remains a functional signifier rather than a decorative element. Hairlines (#E5E0D6) provide structural definition without the weight of traditional borders.\n\n## Typography\nThe typography utilizes **Inter** to achieve a neutral, utilitarian \"system sans-serif\" feel. Scale is kept tight and disciplined, reflecting native OS patterns rather than web-marketing aesthetics. Body text is set at 14px for optimal readability, while labels and secondary metadata drop to 12px or 11px to maintain hierarchy. Weight is used sparingly—primarily 400 for content and 500/600 for UI headers—to keep the interface feeling light and unencumbered.\n\n## Layout & Spacing\nThe layout follows a **Fluid Grid** model, with the main content area expanding to fill available viewport space while the sidebar maintains a fixed width. A 4px/8px baseline grid governs all internal spacing. Margins are generous to prevent the UI from feeling \"cramped,\" reinforcing the calm personality. Structural elements are separated by 1px hairlines rather than whitespace alone to ensure clear mental mapping of the browser's functional regions.\n\n## Elevation & Depth\nThis design system intentionally eschews all drop shadows. Depth is communicated exclusively through **Tonal Layers** and **Low-Contrast Outlines**. The background (#FFFFFF) represents the highest/closest layer (the page), while the sidebar (#F8F4EC) sits \"below\" or \"behind\" it as the frame. Overlays, such as menus or tooltips, should be defined by a 1px hairline border (#E5E0D6) against the background, relying on color contrast rather than shadow to indicate a change in Z-index.\n\n## Shapes\nThe shape language is precise and geometric. While the system uses a base \"Soft\" rounding, specific radii are enforced for consistency: 8px for containers and cards to provide a modern yet structured feel, and 4px for smaller interactive components like toggles and checkboxes to maintain a technical \"tool-like\" appearance. Interactive \"pills\" used for navigation or tagging use a fully rounded (100px) radius to differentiate them from structural containers.\n\n## Components\n- **Sidebar Pills:** Active states must use a background of #A8C8E8 at 30% opacity with #1A1A1A text. The shape is a full pill.\n- **Toggles:** Use a 4px corner radius. The \"on\" state utilizes the #A8C8E8 accent color. There is no shadow on the toggle switch itself.\n- **Buttons:** Primary buttons are flat, using the accent color or a subtle light-grey fill. Text is always #1A1A1A. Hover states should only involve a slight darken of the background or a 1px stroke.\n- **Input Fields:** Styled as \"ghost\" inputs or defined by a #E5E0D6 bottom hairline. On focus, the border or focus ring transitions to #A8C8E8.\n- **Cards:** 8px radius with a 1px #E5E0D6 border. No background fill difference unless the card is nested on a white surface.\n- **Checkboxes/Radios:** Use 4px radius for checkboxes and full circles for radios, utilizing #A8C8E8 for the checked state.",
+              "font": "INTER",
+              "headlineFont": "INTER",
+              "labelFont": "INTER",
+              "namedColors": {
+                "background": "#fdf8f8",
+                "error": "#ba1a1a",
+                "error_container": "#ffdad6",
+                "inverse_on_surface": "#f4f0ef",
+                "inverse_primary": "#c8c6c5",
+                "inverse_surface": "#313030",
+                "on_background": "#1c1b1b",
+                "on_error": "#ffffff",
+                "on_error_container": "#93000a",
+                "on_primary": "#ffffff",
+                "on_primary_container": "#858383",
+                "on_primary_fixed": "#1c1b1b",
+                "on_primary_fixed_variant": "#474746",
+                "on_secondary": "#ffffff",
+                "on_secondary_container": "#646464",
+                "on_secondary_fixed": "#1b1c1c",
+                "on_secondary_fixed_variant": "#474747",
+                "on_surface": "#1c1b1b",
+                "on_surface_variant": "#444748",
+                "on_tertiary": "#ffffff",
+                "on_tertiary_container": "#868382",
+                "on_tertiary_fixed": "#1c1b1a",
+                "on_tertiary_fixed_variant": "#484645",
+                "outline": "#747878",
+                "outline_variant": "#c4c7c7",
+                "primary": "#000000",
+                "primary_container": "#1c1b1b",
+                "primary_fixed": "#e5e2e1",
+                "primary_fixed_dim": "#c8c6c5",
+                "secondary": "#5e5e5e",
+                "secondary_container": "#e4e2e2",
+                "secondary_fixed": "#e4e2e2",
+                "secondary_fixed_dim": "#c8c6c6",
+                "surface": "#fdf8f8",
+                "surface_bright": "#fdf8f8",
+                "surface_container": "#f1edec",
+                "surface_container_high": "#ebe7e6",
+                "surface_container_highest": "#e5e2e1",
+                "surface_container_low": "#f7f3f2",
+                "surface_container_lowest": "#ffffff",
+                "surface_dim": "#ddd9d8",
+                "surface_tint": "#5f5e5e",
+                "surface_variant": "#e5e2e1",
+                "tertiary": "#000000",
+                "tertiary_container": "#1c1b1a",
+                "tertiary_fixed": "#e6e2df",
+                "tertiary_fixed_dim": "#cac6c4"
+              },
+              "overridePrimaryColor": "#1A1A1A",
+              "overrideSecondaryColor": "#525252",
+              "roundness": "ROUND_FOUR",
+              "spacing": {
+                "base": "4px",
+                "gutter": "12px",
+                "lg": "24px",
+                "md": "16px",
+                "sidebar-width": "260px",
+                "sm": "8px",
+                "xl": "32px",
+                "xs": "4px"
+              },
+              "spacingScale": 2,
+              "typography": {
+                "body-md": {
+                  "fontFamily": "Inter",
+                  "fontSize": "14px",
+                  "fontWeight": "400",
+                  "letterSpacing": "0",
+                  "lineHeight": "20px"
+                },
+                "body-sm": {
+                  "fontFamily": "Inter",
+                  "fontSize": "13px",
+                  "fontWeight": "400",
+                  "letterSpacing": "0",
+                  "lineHeight": "18px"
+                },
+                "display-sm": {
+                  "fontFamily": "Inter",
+                  "fontSize": "20px",
+                  "fontWeight": "600",
+                  "letterSpacing": "-0.01em",
+                  "lineHeight": "28px"
+                },
+                "label-md": {
+                  "fontFamily": "Inter",
+                  "fontSize": "12px",
+                  "fontWeight": "500",
+                  "letterSpacing": "0.02em",
+                  "lineHeight": "16px"
+                },
+                "label-sm": {
+                  "fontFamily": "Inter",
+                  "fontSize": "11px",
+                  "fontWeight": "600",
+                  "letterSpacing": "0.03em",
+                  "lineHeight": "14px"
+                }
+              }
+            },
+            "title": "Phlink Appearance Settings",
+            "width": "2560"
+          }
+        ],
+        "theme": {}
+      }
+    },
+    {
+      "text": "I've designed the Appearance settings page for Phlink. \n\nKey features:\n- **Chromium-inspired Layout:** A familiar desktop browser settings structure with a top header and left-hand sidebar.\n- **Theme Selection:** A dedicated section for choosing between Light, Dark, or System themes using preview cards.\n- **Calm Aesthetic:** Used the specific #F8F4EC sidebar and #A8C8E8 accent color as requested, keeping the design clean and recessive with no drop shadows and subtle hairlines.\n- **Functional Controls:** Included the toggles for the home button and bookmarks bar, as well as dropdowns for font and zoom settings.\n\nDoes this capture the \"quintessentially Chromium\" feel you were looking for?"
+    },
+    {
+      "suggestion": "Add the 'Privacy and security' page"
+    },
+    {
+      "suggestion": "Design the 'Customize fonts' sub-page"
+    },
+    {
+      "suggestion": "Show how the Dark theme version looks"
+    }
+  ],
+  "projectId": "12962487919675094023",
+  "sessionId": "2361813611783640560"
+}

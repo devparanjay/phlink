@@ -1,0 +1,445 @@
+{
+  "outputComponents": [
+    {
+      "designSystem": {
+        "designSystem": {
+          "displayName": "Phlink Utility",
+          "styleGuidelines": "## Brand & Style\n\nThe design system is rooted in **Minimalism** with a focus on functional clarity and high-density information architecture. It is designed for users who view the browser as a tool rather than a destination—prioritizing content and performance over decorative flourish. \n\nThe aesthetic is \"technical-industrial,\" utilizing a dark, warm-neutral canvas that reduces eye strain during long-duration professional workflows. By eschewing shadows and gradients in favor of 1px hairlines and flat tonal layers, the design system achieves a lightweight, \"engine-room\" feel that is both authoritative and unobtrusive.\n\n## Layout & Spacing\n\nThe layout is a **systemic fluid grid** where the main content area expands to fill the viewport, while functional sidebars maintain fixed widths.\n\n- **The Hairline Grid:** Instead of traditional margins, components are separated by 1px borders (#2A2A2A). This creates a \"paneled\" look similar to professional IDEs or technical dashboards.\n- **Density:** The system favors high-density layouts. Standard padding for list items and buttons is 8px (sm) horizontally and 4px (xs) vertically.\n- **Functional Zones:** The UI is divided into the Sidebar (Global Nav), the Toolbar (Contextual Actions/URL), and the Canvas (Web Content).\n\n## Elevation & Depth\n\nThis design system uses **Tonal Layers and Low-Contrast Outlines** instead of shadows. Depth is conveyed exclusively through color stepping and structural borders.\n\n- **Stacking Order:** The Canvas (#0D0D0D) is the furthest back, followed by the Sidebar (#181818), and finally the Card/Pop-over (#1F1F1F).\n- **No Shadows:** Shadows are strictly forbidden. High-priority elements like modals or tooltips must use a 1px border (#2A2A2A) to separate themselves from the layer below.\n- **Focus States:** Depth is simulated by swapping the 1px border color from the standard gray to the Primary Accent (#F5E68A).\n\n## Components\n\n- **Buttons:**\n  - *Primary:* Solid #F5E68A background with #000000 text. No border.\n  - *Secondary:* Transparent background with 1px #2A2A2A border. White text.\n  - *Ghost:* Transparent background, no border. #A0A0A0 text that turns white on hover.\n- **Toggles:** Use the 4px radius. The \"off\" track is #2A2A2A; the \"on\" track is #F5E68A with a black internal thumb.\n- **Input Fields:** #1F1F1F background with 1px #2A2A2A border. Text is #FFFFFF. Focus state changes the border to #F5E68A.\n- **Cards:** #1F1F1F background with an 8px radius. Content inside cards should follow the 8px/16px spacing rhythm.\n- **Tabs:** Active tabs are highlighted with a 2px top-border of #F5E68A. Inactive tabs use #A0A0A0 text.\n- **Lists:** Items should have a subtle #1F1F1F background on hover. Use 1px #2A2A2A separators between items only if the list is extremely dense.\n- **Scrollbars:** Custom-styled to be thin (6px), #2A2A2A track, #A0A0A0 thumb, with no arrows.",
+          "theme": {
+            "bodyFont": "INTER",
+            "colorMode": "DARK",
+            "colorVariant": "FIDELITY",
+            "customColor": "#F5E68A",
+            "designMd": "---\nname: Phlink Utility\ncolors:\n  surface: '#131313'\n  surface-dim: '#131313'\n  surface-bright: '#3a3939'\n  surface-container-lowest: '#0e0e0e'\n  surface-container-low: '#1c1b1b'\n  surface-container: '#201f1f'\n  surface-container-high: '#2a2a2a'\n  surface-container-highest: '#353534'\n  on-surface: '#e5e2e1'\n  on-surface-variant: '#ccc6b3'\n  inverse-surface: '#e5e2e1'\n  inverse-on-surface: '#313030'\n  outline: '#95917f'\n  outline-variant: '#4a4738'\n  surface-tint: '#d6c86f'\n  primary: '#ffffff'\n  on-primary: '#373100'\n  primary-container: '#f3e488'\n  on-primary-container: '#706516'\n  inverse-primary: '#695f10'\n  secondary: '#c8c6c5'\n  on-secondary: '#303030'\n  secondary-container: '#474746'\n  on-secondary-container: '#b7b5b4'\n  tertiary: '#ffffff'\n  on-tertiary: '#003640'\n  tertiary-container: '#b0ecfd'\n  on-tertiary-container: '#2f6c7b'\n  error: '#ffb4ab'\n  on-error: '#690005'\n  error-container: '#93000a'\n  on-error-container: '#ffdad6'\n  primary-fixed: '#f3e488'\n  primary-fixed-dim: '#d6c86f'\n  on-primary-fixed: '#201c00'\n  on-primary-fixed-variant: '#504700'\n  secondary-fixed: '#e5e2e1'\n  secondary-fixed-dim: '#c8c6c5'\n  on-secondary-fixed: '#1b1b1c'\n  on-secondary-fixed-variant: '#474746'\n  tertiary-fixed: '#b0ecfd'\n  tertiary-fixed-dim: '#94d0e0'\n  on-tertiary-fixed: '#001f26'\n  on-tertiary-fixed-variant: '#004e5c'\n  background: '#131313'\n  on-background: '#e5e2e1'\n  surface-variant: '#353534'\ntypography:\n  display:\n    fontFamily: Inter\n    fontSize: 24px\n    fontWeight: '600'\n    lineHeight: 32px\n    letterSpacing: -0.02em\n  header-1:\n    fontFamily: Inter\n    fontSize: 18px\n    fontWeight: '600'\n    lineHeight: 24px\n    letterSpacing: -0.01em\n  header-2:\n    fontFamily: Inter\n    fontSize: 14px\n    fontWeight: '600'\n    lineHeight: 20px\n    letterSpacing: 0em\n  body-main:\n    fontFamily: Inter\n    fontSize: 14px\n    fontWeight: '400'\n    lineHeight: 20px\n    letterSpacing: 0em\n  body-sm:\n    fontFamily: Inter\n    fontSize: 12px\n    fontWeight: '400'\n    lineHeight: 16px\n    letterSpacing: 0em\n  label-caps:\n    fontFamily: Inter\n    fontSize: 11px\n    fontWeight: '700'\n    lineHeight: 16px\n    letterSpacing: 0.05em\n  code:\n    fontFamily: monospace\n    fontSize: 13px\n    fontWeight: '400'\n    lineHeight: 18px\n    letterSpacing: 0em\nrounded:\n  sm: 0.125rem\n  DEFAULT: 0.25rem\n  md: 0.375rem\n  lg: 0.5rem\n  xl: 0.75rem\n  full: 9999px\nspacing:\n  base: 4px\n  xs: 4px\n  sm: 8px\n  md: 16px\n  lg: 24px\n  xl: 32px\n  gutter: 1px\n  sidebar_width: 240px\n  toolbar_height: 48px\n---\n\n## Brand & Style\n\nThe design system is rooted in **Minimalism** with a focus on functional clarity and high-density information architecture. It is designed for users who view the browser as a tool rather than a destination—prioritizing content and performance over decorative flourish. \n\nThe aesthetic is \"technical-industrial,\" utilizing a dark, warm-neutral canvas that reduces eye strain during long-duration professional workflows. By eschewing shadows and gradients in favor of 1px hairlines and flat tonal layers, the design system achieves a lightweight, \"engine-room\" feel that is both authoritative and unobtrusive.\n\n## Colors\n\nThis design system utilizes a tiered grayscale palette to establish hierarchy without relying on depth effects.\n\n- **Canvas (#0D0D0D):** The base layer for the main browsing window. Its slight warmth prevents the \"inky\" feel of pure black, maintaining readability.\n- **Sidebar (#181818):** A mid-step gray used to differentiate navigation and utility zones from the content canvas.\n- **Surface/Card (#1F1F1F):** The highest elevation layer for interactive modules and containers.\n- **Primary Accent (#F5E68A):** A pastel yellow used sparingly for focus states, primary actions, and notifications. This high-contrast element ensures immediate visual recognition of the active state.\n- **Hairline (#2A2A2A):** The structural backbone of the UI. All separation is handled via these 1px borders.\n\n## Typography\n\nThe design system employs **Inter** for all system-level UI, chosen for its exceptional legibility and neutral, utilitarian character. \n\n- **Primary Text:** White (#FFFFFF) is used for all high-priority information and active tab titles.\n- **Secondary Text:** Slate Gray (#A0A0A0) is used for descriptions, inactive states, and metadata to reduce visual noise.\n- **Alignment:** All text should align to a 4px baseline grid to ensure vertical rhythm across sidebars and toolbars.\n- **Contrast:** Every text-on-background combination must exceed WCAG AA standards (4.5:1 ratio).\n\n## Layout & Spacing\n\nThe layout is a **systemic fluid grid** where the main content area expands to fill the viewport, while functional sidebars maintain fixed widths.\n\n- **The Hairline Grid:** Instead of traditional margins, components are separated by 1px borders (#2A2A2A). This creates a \"paneled\" look similar to professional IDEs or technical dashboards.\n- **Density:** The system favors high-density layouts. Standard padding for list items and buttons is 8px (sm) horizontally and 4px (xs) vertically.\n- **Functional Zones:** The UI is divided into the Sidebar (Global Nav), the Toolbar (Contextual Actions/URL), and the Canvas (Web Content).\n\n## Elevation & Depth\n\nThis design system uses **Tonal Layers and Low-Contrast Outlines** instead of shadows. Depth is conveyed exclusively through color stepping and structural borders.\n\n- **Stacking Order:** The Canvas (#0D0D0D) is the furthest back, followed by the Sidebar (#181818), and finally the Card/Pop-over (#1F1F1F).\n- **No Shadows:** Shadows are strictly forbidden. High-priority elements like modals or tooltips must use a 1px border (#2A2A2A) to separate themselves from the layer below.\n- **Focus States:** Depth is simulated by swapping the 1px border color from the standard gray to the Primary Accent (#F5E68A).\n\n## Shapes\n\nThe shape language is controlled and geometric, leaning toward a \"Soft\" classification but with specific constraints for technical components.\n\n- **Cards & Modals:** Use an 8px radius to provide a slight visual softening against the sharp 1px grid.\n- **Interactive Elements:** Buttons, toggles, and input fields use a tighter 4px radius, emphasizing their identity as individual clickable tools.\n- **Tabs:** Top tabs should have a 4px top radius and 0px bottom radius to \"anchor\" them to the toolbar.\n\n## Components\n\n- **Buttons:**\n  - *Primary:* Solid #F5E68A background with #000000 text. No border.\n  - *Secondary:* Transparent background with 1px #2A2A2A border. White text.\n  - *Ghost:* Transparent background, no border. #A0A0A0 text that turns white on hover.\n- **Toggles:** Use the 4px radius. The \"off\" track is #2A2A2A; the \"on\" track is #F5E68A with a black internal thumb.\n- **Input Fields:** #1F1F1F background with 1px #2A2A2A border. Text is #FFFFFF. Focus state changes the border to #F5E68A.\n- **Cards:** #1F1F1F background with an 8px radius. Content inside cards should follow the 8px/16px spacing rhythm.\n- **Tabs:** Active tabs are highlighted with a 2px top-border of #F5E68A. Inactive tabs use #A0A0A0 text.\n- **Lists:** Items should have a subtle #1F1F1F background on hover. Use 1px #2A2A2A separators between items only if the list is extremely dense.\n- **Scrollbars:** Custom-styled to be thin (6px), #2A2A2A track, #A0A0A0 thumb, with no arrows.",
+            "font": "INTER",
+            "headlineFont": "INTER",
+            "labelFont": "INTER",
+            "namedColors": {
+              "background": "#131313",
+              "error": "#ffb4ab",
+              "error_container": "#93000a",
+              "inverse_on_surface": "#313030",
+              "inverse_primary": "#695f10",
+              "inverse_surface": "#e5e2e1",
+              "on_background": "#e5e2e1",
+              "on_error": "#690005",
+              "on_error_container": "#ffdad6",
+              "on_primary": "#373100",
+              "on_primary_container": "#706516",
+              "on_primary_fixed": "#201c00",
+              "on_primary_fixed_variant": "#504700",
+              "on_secondary": "#303030",
+              "on_secondary_container": "#b7b5b4",
+              "on_secondary_fixed": "#1b1b1c",
+              "on_secondary_fixed_variant": "#474746",
+              "on_surface": "#e5e2e1",
+              "on_surface_variant": "#ccc6b3",
+              "on_tertiary": "#003640",
+              "on_tertiary_container": "#2f6c7b",
+              "on_tertiary_fixed": "#001f26",
+              "on_tertiary_fixed_variant": "#004e5c",
+              "outline": "#95917f",
+              "outline_variant": "#4a4738",
+              "primary": "#ffffff",
+              "primary_container": "#f3e488",
+              "primary_fixed": "#f3e488",
+              "primary_fixed_dim": "#d6c86f",
+              "secondary": "#c8c6c5",
+              "secondary_container": "#474746",
+              "secondary_fixed": "#e5e2e1",
+              "secondary_fixed_dim": "#c8c6c5",
+              "surface": "#131313",
+              "surface_bright": "#3a3939",
+              "surface_container": "#201f1f",
+              "surface_container_high": "#2a2a2a",
+              "surface_container_highest": "#353534",
+              "surface_container_low": "#1c1b1b",
+              "surface_container_lowest": "#0e0e0e",
+              "surface_dim": "#131313",
+              "surface_tint": "#d6c86f",
+              "surface_variant": "#353534",
+              "tertiary": "#ffffff",
+              "tertiary_container": "#b0ecfd",
+              "tertiary_fixed": "#b0ecfd",
+              "tertiary_fixed_dim": "#94d0e0"
+            },
+            "overrideNeutralColor": "#0D0D0D",
+            "overridePrimaryColor": "#F5E68A",
+            "overrideSecondaryColor": "#1F1F1F",
+            "roundness": "ROUND_FOUR",
+            "spacing": {
+              "base": "4px",
+              "gutter": "1px",
+              "lg": "24px",
+              "md": "16px",
+              "sidebar_width": "240px",
+              "sm": "8px",
+              "toolbar_height": "48px",
+              "xl": "32px",
+              "xs": "4px"
+            },
+            "spacingScale": 2,
+            "typography": {
+              "body-main": {
+                "fontFamily": "Inter",
+                "fontSize": "14px",
+                "fontWeight": "400",
+                "letterSpacing": "0em",
+                "lineHeight": "20px"
+              },
+              "body-sm": {
+                "fontFamily": "Inter",
+                "fontSize": "12px",
+                "fontWeight": "400",
+                "letterSpacing": "0em",
+                "lineHeight": "16px"
+              },
+              "code": {
+                "fontFamily": "monospace",
+                "fontSize": "13px",
+                "fontWeight": "400",
+                "letterSpacing": "0em",
+                "lineHeight": "18px"
+              },
+              "display": {
+                "fontFamily": "Inter",
+                "fontSize": "24px",
+                "fontWeight": "600",
+                "letterSpacing": "-0.02em",
+                "lineHeight": "32px"
+              },
+              "header-1": {
+                "fontFamily": "Inter",
+                "fontSize": "18px",
+                "fontWeight": "600",
+                "letterSpacing": "-0.01em",
+                "lineHeight": "24px"
+              },
+              "header-2": {
+                "fontFamily": "Inter",
+                "fontSize": "14px",
+                "fontWeight": "600",
+                "letterSpacing": "0em",
+                "lineHeight": "20px"
+              },
+              "label-caps": {
+                "fontFamily": "Inter",
+                "fontSize": "11px",
+                "fontWeight": "700",
+                "letterSpacing": "0.05em",
+                "lineHeight": "16px"
+              }
+            }
+          }
+        },
+        "name": "assets/bc9343df12424d598939d12fdab96ba5",
+        "version": "1"
+      }
+    },
+    {
+      "design": {
+        "screens": [
+          {
+            "designSystem": {
+              "designSystem": {
+                "displayName": "Phlink Utility",
+                "styleGuidelines": "## Brand & Style\n\nThe design system is rooted in **Minimalism** with a focus on functional clarity and high-density information architecture. It is designed for users who view the browser as a tool rather than a destination—prioritizing content and performance over decorative flourish. \n\nThe aesthetic is \"technical-industrial,\" utilizing a dark, warm-neutral canvas that reduces eye strain during long-duration professional workflows. By eschewing shadows and gradients in favor of 1px hairlines and flat tonal layers, the design system achieves a lightweight, \"engine-room\" feel that is both authoritative and unobtrusive.\n\n## Layout & Spacing\n\nThe layout is a **systemic fluid grid** where the main content area expands to fill the viewport, while functional sidebars maintain fixed widths.\n\n- **The Hairline Grid:** Instead of traditional margins, components are separated by 1px borders (#2A2A2A). This creates a \"paneled\" look similar to professional IDEs or technical dashboards.\n- **Density:** The system favors high-density layouts. Standard padding for list items and buttons is 8px (sm) horizontally and 4px (xs) vertically.\n- **Functional Zones:** The UI is divided into the Sidebar (Global Nav), the Toolbar (Contextual Actions/URL), and the Canvas (Web Content).\n\n## Elevation & Depth\n\nThis design system uses **Tonal Layers and Low-Contrast Outlines** instead of shadows. Depth is conveyed exclusively through color stepping and structural borders.\n\n- **Stacking Order:** The Canvas (#0D0D0D) is the furthest back, followed by the Sidebar (#181818), and finally the Card/Pop-over (#1F1F1F).\n- **No Shadows:** Shadows are strictly forbidden. High-priority elements like modals or tooltips must use a 1px border (#2A2A2A) to separate themselves from the layer below.\n- **Focus States:** Depth is simulated by swapping the 1px border color from the standard gray to the Primary Accent (#F5E68A).\n\n## Components\n\n- **Buttons:**\n  - *Primary:* Solid #F5E68A background with #000000 text. No border.\n  - *Secondary:* Transparent background with 1px #2A2A2A border. White text.\n  - *Ghost:* Transparent background, no border. #A0A0A0 text that turns white on hover.\n- **Toggles:** Use the 4px radius. The \"off\" track is #2A2A2A; the \"on\" track is #F5E68A with a black internal thumb.\n- **Input Fields:** #1F1F1F background with 1px #2A2A2A border. Text is #FFFFFF. Focus state changes the border to #F5E68A.\n- **Cards:** #1F1F1F background with an 8px radius. Content inside cards should follow the 8px/16px spacing rhythm.\n- **Tabs:** Active tabs are highlighted with a 2px top-border of #F5E68A. Inactive tabs use #A0A0A0 text.\n- **Lists:** Items should have a subtle #1F1F1F background on hover. Use 1px #2A2A2A separators between items only if the list is extremely dense.\n- **Scrollbars:** Custom-styled to be thin (6px), #2A2A2A track, #A0A0A0 thumb, with no arrows.",
+                "theme": {
+                  "bodyFont": "INTER",
+                  "colorMode": "DARK",
+                  "colorVariant": "FIDELITY",
+                  "customColor": "#F5E68A",
+                  "designMd": "---\nname: Phlink Utility\ncolors:\n  surface: '#131313'\n  surface-dim: '#131313'\n  surface-bright: '#3a3939'\n  surface-container-lowest: '#0e0e0e'\n  surface-container-low: '#1c1b1b'\n  surface-container: '#201f1f'\n  surface-container-high: '#2a2a2a'\n  surface-container-highest: '#353534'\n  on-surface: '#e5e2e1'\n  on-surface-variant: '#ccc6b3'\n  inverse-surface: '#e5e2e1'\n  inverse-on-surface: '#313030'\n  outline: '#95917f'\n  outline-variant: '#4a4738'\n  surface-tint: '#d6c86f'\n  primary: '#ffffff'\n  on-primary: '#373100'\n  primary-container: '#f3e488'\n  on-primary-container: '#706516'\n  inverse-primary: '#695f10'\n  secondary: '#c8c6c5'\n  on-secondary: '#303030'\n  secondary-container: '#474746'\n  on-secondary-container: '#b7b5b4'\n  tertiary: '#ffffff'\n  on-tertiary: '#003640'\n  tertiary-container: '#b0ecfd'\n  on-tertiary-container: '#2f6c7b'\n  error: '#ffb4ab'\n  on-error: '#690005'\n  error-container: '#93000a'\n  on-error-container: '#ffdad6'\n  primary-fixed: '#f3e488'\n  primary-fixed-dim: '#d6c86f'\n  on-primary-fixed: '#201c00'\n  on-primary-fixed-variant: '#504700'\n  secondary-fixed: '#e5e2e1'\n  secondary-fixed-dim: '#c8c6c5'\n  on-secondary-fixed: '#1b1b1c'\n  on-secondary-fixed-variant: '#474746'\n  tertiary-fixed: '#b0ecfd'\n  tertiary-fixed-dim: '#94d0e0'\n  on-tertiary-fixed: '#001f26'\n  on-tertiary-fixed-variant: '#004e5c'\n  background: '#131313'\n  on-background: '#e5e2e1'\n  surface-variant: '#353534'\ntypography:\n  display:\n    fontFamily: Inter\n    fontSize: 24px\n    fontWeight: '600'\n    lineHeight: 32px\n    letterSpacing: -0.02em\n  header-1:\n    fontFamily: Inter\n    fontSize: 18px\n    fontWeight: '600'\n    lineHeight: 24px\n    letterSpacing: -0.01em\n  header-2:\n    fontFamily: Inter\n    fontSize: 14px\n    fontWeight: '600'\n    lineHeight: 20px\n    letterSpacing: 0em\n  body-main:\n    fontFamily: Inter\n    fontSize: 14px\n    fontWeight: '400'\n    lineHeight: 20px\n    letterSpacing: 0em\n  body-sm:\n    fontFamily: Inter\n    fontSize: 12px\n    fontWeight: '400'\n    lineHeight: 16px\n    letterSpacing: 0em\n  label-caps:\n    fontFamily: Inter\n    fontSize: 11px\n    fontWeight: '700'\n    lineHeight: 16px\n    letterSpacing: 0.05em\n  code:\n    fontFamily: monospace\n    fontSize: 13px\n    fontWeight: '400'\n    lineHeight: 18px\n    letterSpacing: 0em\nrounded:\n  sm: 0.125rem\n  DEFAULT: 0.25rem\n  md: 0.375rem\n  lg: 0.5rem\n  xl: 0.75rem\n  full: 9999px\nspacing:\n  base: 4px\n  xs: 4px\n  sm: 8px\n  md: 16px\n  lg: 24px\n  xl: 32px\n  gutter: 1px\n  sidebar_width: 240px\n  toolbar_height: 48px\n---\n\n## Brand & Style\n\nThe design system is rooted in **Minimalism** with a focus on functional clarity and high-density information architecture. It is designed for users who view the browser as a tool rather than a destination—prioritizing content and performance over decorative flourish. \n\nThe aesthetic is \"technical-industrial,\" utilizing a dark, warm-neutral canvas that reduces eye strain during long-duration professional workflows. By eschewing shadows and gradients in favor of 1px hairlines and flat tonal layers, the design system achieves a lightweight, \"engine-room\" feel that is both authoritative and unobtrusive.\n\n## Colors\n\nThis design system utilizes a tiered grayscale palette to establish hierarchy without relying on depth effects.\n\n- **Canvas (#0D0D0D):** The base layer for the main browsing window. Its slight warmth prevents the \"inky\" feel of pure black, maintaining readability.\n- **Sidebar (#181818):** A mid-step gray used to differentiate navigation and utility zones from the content canvas.\n- **Surface/Card (#1F1F1F):** The highest elevation layer for interactive modules and containers.\n- **Primary Accent (#F5E68A):** A pastel yellow used sparingly for focus states, primary actions, and notifications. This high-contrast element ensures immediate visual recognition of the active state.\n- **Hairline (#2A2A2A):** The structural backbone of the UI. All separation is handled via these 1px borders.\n\n## Typography\n\nThe design system employs **Inter** for all system-level UI, chosen for its exceptional legibility and neutral, utilitarian character. \n\n- **Primary Text:** White (#FFFFFF) is used for all high-priority information and active tab titles.\n- **Secondary Text:** Slate Gray (#A0A0A0) is used for descriptions, inactive states, and metadata to reduce visual noise.\n- **Alignment:** All text should align to a 4px baseline grid to ensure vertical rhythm across sidebars and toolbars.\n- **Contrast:** Every text-on-background combination must exceed WCAG AA standards (4.5:1 ratio).\n\n## Layout & Spacing\n\nThe layout is a **systemic fluid grid** where the main content area expands to fill the viewport, while functional sidebars maintain fixed widths.\n\n- **The Hairline Grid:** Instead of traditional margins, components are separated by 1px borders (#2A2A2A). This creates a \"paneled\" look similar to professional IDEs or technical dashboards.\n- **Density:** The system favors high-density layouts. Standard padding for list items and buttons is 8px (sm) horizontally and 4px (xs) vertically.\n- **Functional Zones:** The UI is divided into the Sidebar (Global Nav), the Toolbar (Contextual Actions/URL), and the Canvas (Web Content).\n\n## Elevation & Depth\n\nThis design system uses **Tonal Layers and Low-Contrast Outlines** instead of shadows. Depth is conveyed exclusively through color stepping and structural borders.\n\n- **Stacking Order:** The Canvas (#0D0D0D) is the furthest back, followed by the Sidebar (#181818), and finally the Card/Pop-over (#1F1F1F).\n- **No Shadows:** Shadows are strictly forbidden. High-priority elements like modals or tooltips must use a 1px border (#2A2A2A) to separate themselves from the layer below.\n- **Focus States:** Depth is simulated by swapping the 1px border color from the standard gray to the Primary Accent (#F5E68A).\n\n## Shapes\n\nThe shape language is controlled and geometric, leaning toward a \"Soft\" classification but with specific constraints for technical components.\n\n- **Cards & Modals:** Use an 8px radius to provide a slight visual softening against the sharp 1px grid.\n- **Interactive Elements:** Buttons, toggles, and input fields use a tighter 4px radius, emphasizing their identity as individual clickable tools.\n- **Tabs:** Top tabs should have a 4px top radius and 0px bottom radius to \"anchor\" them to the toolbar.\n\n## Components\n\n- **Buttons:**\n  - *Primary:* Solid #F5E68A background with #000000 text. No border.\n  - *Secondary:* Transparent background with 1px #2A2A2A border. White text.\n  - *Ghost:* Transparent background, no border. #A0A0A0 text that turns white on hover.\n- **Toggles:** Use the 4px radius. The \"off\" track is #2A2A2A; the \"on\" track is #F5E68A with a black internal thumb.\n- **Input Fields:** #1F1F1F background with 1px #2A2A2A border. Text is #FFFFFF. Focus state changes the border to #F5E68A.\n- **Cards:** #1F1F1F background with an 8px radius. Content inside cards should follow the 8px/16px spacing rhythm.\n- **Tabs:** Active tabs are highlighted with a 2px top-border of #F5E68A. Inactive tabs use #A0A0A0 text.\n- **Lists:** Items should have a subtle #1F1F1F background on hover. Use 1px #2A2A2A separators between items only if the list is extremely dense.\n- **Scrollbars:** Custom-styled to be thin (6px), #2A2A2A track, #A0A0A0 thumb, with no arrows.",
+                  "font": "INTER",
+                  "headlineFont": "INTER",
+                  "labelFont": "INTER",
+                  "namedColors": {
+                    "background": "#131313",
+                    "error": "#ffb4ab",
+                    "error_container": "#93000a",
+                    "inverse_on_surface": "#313030",
+                    "inverse_primary": "#695f10",
+                    "inverse_surface": "#e5e2e1",
+                    "on_background": "#e5e2e1",
+                    "on_error": "#690005",
+                    "on_error_container": "#ffdad6",
+                    "on_primary": "#373100",
+                    "on_primary_container": "#706516",
+                    "on_primary_fixed": "#201c00",
+                    "on_primary_fixed_variant": "#504700",
+                    "on_secondary": "#303030",
+                    "on_secondary_container": "#b7b5b4",
+                    "on_secondary_fixed": "#1b1b1c",
+                    "on_secondary_fixed_variant": "#474746",
+                    "on_surface": "#e5e2e1",
+                    "on_surface_variant": "#ccc6b3",
+                    "on_tertiary": "#003640",
+                    "on_tertiary_container": "#2f6c7b",
+                    "on_tertiary_fixed": "#001f26",
+                    "on_tertiary_fixed_variant": "#004e5c",
+                    "outline": "#95917f",
+                    "outline_variant": "#4a4738",
+                    "primary": "#ffffff",
+                    "primary_container": "#f3e488",
+                    "primary_fixed": "#f3e488",
+                    "primary_fixed_dim": "#d6c86f",
+                    "secondary": "#c8c6c5",
+                    "secondary_container": "#474746",
+                    "secondary_fixed": "#e5e2e1",
+                    "secondary_fixed_dim": "#c8c6c5",
+                    "surface": "#131313",
+                    "surface_bright": "#3a3939",
+                    "surface_container": "#201f1f",
+                    "surface_container_high": "#2a2a2a",
+                    "surface_container_highest": "#353534",
+                    "surface_container_low": "#1c1b1b",
+                    "surface_container_lowest": "#0e0e0e",
+                    "surface_dim": "#131313",
+                    "surface_tint": "#d6c86f",
+                    "surface_variant": "#353534",
+                    "tertiary": "#ffffff",
+                    "tertiary_container": "#b0ecfd",
+                    "tertiary_fixed": "#b0ecfd",
+                    "tertiary_fixed_dim": "#94d0e0"
+                  },
+                  "overrideNeutralColor": "#0D0D0D",
+                  "overridePrimaryColor": "#F5E68A",
+                  "overrideSecondaryColor": "#1F1F1F",
+                  "roundness": "ROUND_FOUR",
+                  "spacing": {
+                    "base": "4px",
+                    "gutter": "1px",
+                    "lg": "24px",
+                    "md": "16px",
+                    "sidebar_width": "240px",
+                    "sm": "8px",
+                    "toolbar_height": "48px",
+                    "xl": "32px",
+                    "xs": "4px"
+                  },
+                  "spacingScale": 2,
+                  "typography": {
+                    "body-main": {
+                      "fontFamily": "Inter",
+                      "fontSize": "14px",
+                      "fontWeight": "400",
+                      "letterSpacing": "0em",
+                      "lineHeight": "20px"
+                    },
+                    "body-sm": {
+                      "fontFamily": "Inter",
+                      "fontSize": "12px",
+                      "fontWeight": "400",
+                      "letterSpacing": "0em",
+                      "lineHeight": "16px"
+                    },
+                    "code": {
+                      "fontFamily": "monospace",
+                      "fontSize": "13px",
+                      "fontWeight": "400",
+                      "letterSpacing": "0em",
+                      "lineHeight": "18px"
+                    },
+                    "display": {
+                      "fontFamily": "Inter",
+                      "fontSize": "24px",
+                      "fontWeight": "600",
+                      "letterSpacing": "-0.02em",
+                      "lineHeight": "32px"
+                    },
+                    "header-1": {
+                      "fontFamily": "Inter",
+                      "fontSize": "18px",
+                      "fontWeight": "600",
+                      "letterSpacing": "-0.01em",
+                      "lineHeight": "24px"
+                    },
+                    "header-2": {
+                      "fontFamily": "Inter",
+                      "fontSize": "14px",
+                      "fontWeight": "600",
+                      "letterSpacing": "0em",
+                      "lineHeight": "20px"
+                    },
+                    "label-caps": {
+                      "fontFamily": "Inter",
+                      "fontSize": "11px",
+                      "fontWeight": "700",
+                      "letterSpacing": "0.05em",
+                      "lineHeight": "16px"
+                    }
+                  }
+                }
+              },
+              "name": "assets/bc9343df12424d598939d12fdab96ba5",
+              "version": "1"
+            },
+            "deviceType": "DESKTOP",
+            "generatedBy": "figaro_agent",
+            "height": "2048",
+            "htmlCode": {
+              "downloadUrl": "https://contribution.usercontent.google.com/download?c=CgthaWRhX2NvZGVmeBJ8Eh1hcHBfY29tcGFuaW9uX2dlbmVyYXRlZF9maWxlcxpbCiVodG1sX2FhNjA5MTNkYTkyZDRhNzZhNGY2MTY2NzA2ZjRmMzQ5EgsSBxCxnJywzAQYAZIBJAoKcHJvamVjdF9pZBIWQhQxMjk2MjQ4NzkxOTY3NTA5NDAyMw&filename=&opi=96797242",
+              "mimeType": "text/html",
+              "name": "projects/12962487919675094023/files/4857e29dc97548d99e418fd808e923c3"
+            },
+            "id": "78ee6997e0f44c00a1e90510d454a503",
+            "name": "projects/12962487919675094023/screens/78ee6997e0f44c00a1e90510d454a503",
+            "prompt": "A high-density desktop browser settings page for \"Phlink\" appearance in dark mode. \nLayout: \n- Top Header Bar: \"Settings\" title + search input on right.\n- Left Sidebar (260px): Navigation items listed (Appearance active).\n- Main Content: \n  1. \"phlink theme\": Three cards horizontally. \"Light\", \"Dark\" (Selected with 2px #F5E68A border and check icon), \"Follow system\". Each card has a small browser mockup preview.\n  2. Settings list below: \n     - \"Show home button\": toggle off\n     - \"Show bookmarks bar\": toggle off\n     - \"Font size\": Medium dropdown\n     - \"Customize fonts\": caret link\n     - \"Page zoom\": 100% dropdown\nStyle:\n- Canvas #0D0D0D, Sidebar #181818, Cards #1F1F1F.\n- Border/Hairline #2A2A2A.\n- Accent #F5E68A for selected states and toggles.\n- NO marketing banners, NO callouts. Just the settings.\n- Desktop density, system fonts, no shadows. \n- Minimum 1280px width.",
+            "screenMetadata": {
+              "agentType": "PRO_AGENT",
+              "status": "COMPLETE"
+            },
+            "screenType": "DESIGN",
+            "screenshot": {
+              "downloadUrl": "https://lh3.googleusercontent.com/aida/ADBb0ujeM6dogODqTt9lkmMyiLOht0d0-23Lo5VVnWm3W99cx35KmYAc-oJqx23UlTL6Yr425W0T_HUXAiv4vjET7y1cly0Mmq1-Qp0JyMq3dCudJDdSlTjtRSLwveNnKsyV89nqYVImZQPM1GCS2u8ZH0KRQB1c0u2utiUJufgt1LTbMNLz0GMcovzgIY7QJ2SzkjWkA67NE8j6vRve_22lt1J9c6yYMHH_BdVulctC3ReQgwDvOHrbPRhj3bCa",
+              "name": "projects/12962487919675094023/files/e780fcf37a2a44a6b5fbdae85599bdfa"
+            },
+            "theme": {
+              "bodyFont": "INTER",
+              "colorMode": "DARK",
+              "colorVariant": "FIDELITY",
+              "customColor": "#F5E68A",
+              "designMd": "---\nname: Phlink Utility\ncolors:\n  surface: '#131313'\n  surface-dim: '#131313'\n  surface-bright: '#3a3939'\n  surface-container-lowest: '#0e0e0e'\n  surface-container-low: '#1c1b1b'\n  surface-container: '#201f1f'\n  surface-container-high: '#2a2a2a'\n  surface-container-highest: '#353534'\n  on-surface: '#e5e2e1'\n  on-surface-variant: '#ccc6b3'\n  inverse-surface: '#e5e2e1'\n  inverse-on-surface: '#313030'\n  outline: '#95917f'\n  outline-variant: '#4a4738'\n  surface-tint: '#d6c86f'\n  primary: '#ffffff'\n  on-primary: '#373100'\n  primary-container: '#f3e488'\n  on-primary-container: '#706516'\n  inverse-primary: '#695f10'\n  secondary: '#c8c6c5'\n  on-secondary: '#303030'\n  secondary-container: '#474746'\n  on-secondary-container: '#b7b5b4'\n  tertiary: '#ffffff'\n  on-tertiary: '#003640'\n  tertiary-container: '#b0ecfd'\n  on-tertiary-container: '#2f6c7b'\n  error: '#ffb4ab'\n  on-error: '#690005'\n  error-container: '#93000a'\n  on-error-container: '#ffdad6'\n  primary-fixed: '#f3e488'\n  primary-fixed-dim: '#d6c86f'\n  on-primary-fixed: '#201c00'\n  on-primary-fixed-variant: '#504700'\n  secondary-fixed: '#e5e2e1'\n  secondary-fixed-dim: '#c8c6c5'\n  on-secondary-fixed: '#1b1b1c'\n  on-secondary-fixed-variant: '#474746'\n  tertiary-fixed: '#b0ecfd'\n  tertiary-fixed-dim: '#94d0e0'\n  on-tertiary-fixed: '#001f26'\n  on-tertiary-fixed-variant: '#004e5c'\n  background: '#131313'\n  on-background: '#e5e2e1'\n  surface-variant: '#353534'\ntypography:\n  display:\n    fontFamily: Inter\n    fontSize: 24px\n    fontWeight: '600'\n    lineHeight: 32px\n    letterSpacing: -0.02em\n  header-1:\n    fontFamily: Inter\n    fontSize: 18px\n    fontWeight: '600'\n    lineHeight: 24px\n    letterSpacing: -0.01em\n  header-2:\n    fontFamily: Inter\n    fontSize: 14px\n    fontWeight: '600'\n    lineHeight: 20px\n    letterSpacing: 0em\n  body-main:\n    fontFamily: Inter\n    fontSize: 14px\n    fontWeight: '400'\n    lineHeight: 20px\n    letterSpacing: 0em\n  body-sm:\n    fontFamily: Inter\n    fontSize: 12px\n    fontWeight: '400'\n    lineHeight: 16px\n    letterSpacing: 0em\n  label-caps:\n    fontFamily: Inter\n    fontSize: 11px\n    fontWeight: '700'\n    lineHeight: 16px\n    letterSpacing: 0.05em\n  code:\n    fontFamily: monospace\n    fontSize: 13px\n    fontWeight: '400'\n    lineHeight: 18px\n    letterSpacing: 0em\nrounded:\n  sm: 0.125rem\n  DEFAULT: 0.25rem\n  md: 0.375rem\n  lg: 0.5rem\n  xl: 0.75rem\n  full: 9999px\nspacing:\n  base: 4px\n  xs: 4px\n  sm: 8px\n  md: 16px\n  lg: 24px\n  xl: 32px\n  gutter: 1px\n  sidebar_width: 240px\n  toolbar_height: 48px\n---\n\n## Brand & Style\n\nThe design system is rooted in **Minimalism** with a focus on functional clarity and high-density information architecture. It is designed for users who view the browser as a tool rather than a destination—prioritizing content and performance over decorative flourish. \n\nThe aesthetic is \"technical-industrial,\" utilizing a dark, warm-neutral canvas that reduces eye strain during long-duration professional workflows. By eschewing shadows and gradients in favor of 1px hairlines and flat tonal layers, the design system achieves a lightweight, \"engine-room\" feel that is both authoritative and unobtrusive.\n\n## Colors\n\nThis design system utilizes a tiered grayscale palette to establish hierarchy without relying on depth effects.\n\n- **Canvas (#0D0D0D):** The base layer for the main browsing window. Its slight warmth prevents the \"inky\" feel of pure black, maintaining readability.\n- **Sidebar (#181818):** A mid-step gray used to differentiate navigation and utility zones from the content canvas.\n- **Surface/Card (#1F1F1F):** The highest elevation layer for interactive modules and containers.\n- **Primary Accent (#F5E68A):** A pastel yellow used sparingly for focus states, primary actions, and notifications. This high-contrast element ensures immediate visual recognition of the active state.\n- **Hairline (#2A2A2A):** The structural backbone of the UI. All separation is handled via these 1px borders.\n\n## Typography\n\nThe design system employs **Inter** for all system-level UI, chosen for its exceptional legibility and neutral, utilitarian character. \n\n- **Primary Text:** White (#FFFFFF) is used for all high-priority information and active tab titles.\n- **Secondary Text:** Slate Gray (#A0A0A0) is used for descriptions, inactive states, and metadata to reduce visual noise.\n- **Alignment:** All text should align to a 4px baseline grid to ensure vertical rhythm across sidebars and toolbars.\n- **Contrast:** Every text-on-background combination must exceed WCAG AA standards (4.5:1 ratio).\n\n## Layout & Spacing\n\nThe layout is a **systemic fluid grid** where the main content area expands to fill the viewport, while functional sidebars maintain fixed widths.\n\n- **The Hairline Grid:** Instead of traditional margins, components are separated by 1px borders (#2A2A2A). This creates a \"paneled\" look similar to professional IDEs or technical dashboards.\n- **Density:** The system favors high-density layouts. Standard padding for list items and buttons is 8px (sm) horizontally and 4px (xs) vertically.\n- **Functional Zones:** The UI is divided into the Sidebar (Global Nav), the Toolbar (Contextual Actions/URL), and the Canvas (Web Content).\n\n## Elevation & Depth\n\nThis design system uses **Tonal Layers and Low-Contrast Outlines** instead of shadows. Depth is conveyed exclusively through color stepping and structural borders.\n\n- **Stacking Order:** The Canvas (#0D0D0D) is the furthest back, followed by the Sidebar (#181818), and finally the Card/Pop-over (#1F1F1F).\n- **No Shadows:** Shadows are strictly forbidden. High-priority elements like modals or tooltips must use a 1px border (#2A2A2A) to separate themselves from the layer below.\n- **Focus States:** Depth is simulated by swapping the 1px border color from the standard gray to the Primary Accent (#F5E68A).\n\n## Shapes\n\nThe shape language is controlled and geometric, leaning toward a \"Soft\" classification but with specific constraints for technical components.\n\n- **Cards & Modals:** Use an 8px radius to provide a slight visual softening against the sharp 1px grid.\n- **Interactive Elements:** Buttons, toggles, and input fields use a tighter 4px radius, emphasizing their identity as individual clickable tools.\n- **Tabs:** Top tabs should have a 4px top radius and 0px bottom radius to \"anchor\" them to the toolbar.\n\n## Components\n\n- **Buttons:**\n  - *Primary:* Solid #F5E68A background with #000000 text. No border.\n  - *Secondary:* Transparent background with 1px #2A2A2A border. White text.\n  - *Ghost:* Transparent background, no border. #A0A0A0 text that turns white on hover.\n- **Toggles:** Use the 4px radius. The \"off\" track is #2A2A2A; the \"on\" track is #F5E68A with a black internal thumb.\n- **Input Fields:** #1F1F1F background with 1px #2A2A2A border. Text is #FFFFFF. Focus state changes the border to #F5E68A.\n- **Cards:** #1F1F1F background with an 8px radius. Content inside cards should follow the 8px/16px spacing rhythm.\n- **Tabs:** Active tabs are highlighted with a 2px top-border of #F5E68A. Inactive tabs use #A0A0A0 text.\n- **Lists:** Items should have a subtle #1F1F1F background on hover. Use 1px #2A2A2A separators between items only if the list is extremely dense.\n- **Scrollbars:** Custom-styled to be thin (6px), #2A2A2A track, #A0A0A0 thumb, with no arrows.",
+              "font": "INTER",
+              "headlineFont": "INTER",
+              "labelFont": "INTER",
+              "namedColors": {
+                "background": "#131313",
+                "error": "#ffb4ab",
+                "error_container": "#93000a",
+                "inverse_on_surface": "#313030",
+                "inverse_primary": "#695f10",
+                "inverse_surface": "#e5e2e1",
+                "on_background": "#e5e2e1",
+                "on_error": "#690005",
+                "on_error_container": "#ffdad6",
+                "on_primary": "#373100",
+                "on_primary_container": "#706516",
+                "on_primary_fixed": "#201c00",
+                "on_primary_fixed_variant": "#504700",
+                "on_secondary": "#303030",
+                "on_secondary_container": "#b7b5b4",
+                "on_secondary_fixed": "#1b1b1c",
+                "on_secondary_fixed_variant": "#474746",
+                "on_surface": "#e5e2e1",
+                "on_surface_variant": "#ccc6b3",
+                "on_tertiary": "#003640",
+                "on_tertiary_container": "#2f6c7b",
+                "on_tertiary_fixed": "#001f26",
+                "on_tertiary_fixed_variant": "#004e5c",
+                "outline": "#95917f",
+                "outline_variant": "#4a4738",
+                "primary": "#ffffff",
+                "primary_container": "#f3e488",
+                "primary_fixed": "#f3e488",
+                "primary_fixed_dim": "#d6c86f",
+                "secondary": "#c8c6c5",
+                "secondary_container": "#474746",
+                "secondary_fixed": "#e5e2e1",
+                "secondary_fixed_dim": "#c8c6c5",
+                "surface": "#131313",
+                "surface_bright": "#3a3939",
+                "surface_container": "#201f1f",
+                "surface_container_high": "#2a2a2a",
+                "surface_container_highest": "#353534",
+                "surface_container_low": "#1c1b1b",
+                "surface_container_lowest": "#0e0e0e",
+                "surface_dim": "#131313",
+                "surface_tint": "#d6c86f",
+                "surface_variant": "#353534",
+                "tertiary": "#ffffff",
+                "tertiary_container": "#b0ecfd",
+                "tertiary_fixed": "#b0ecfd",
+                "tertiary_fixed_dim": "#94d0e0"
+              },
+              "overrideNeutralColor": "#0D0D0D",
+              "overridePrimaryColor": "#F5E68A",
+              "overrideSecondaryColor": "#1F1F1F",
+              "roundness": "ROUND_FOUR",
+              "spacing": {
+                "base": "4px",
+                "gutter": "1px",
+                "lg": "24px",
+                "md": "16px",
+                "sidebar_width": "240px",
+                "sm": "8px",
+                "toolbar_height": "48px",
+                "xl": "32px",
+                "xs": "4px"
+              },
+              "spacingScale": 2,
+              "typography": {
+                "body-main": {
+                  "fontFamily": "Inter",
+                  "fontSize": "14px",
+                  "fontWeight": "400",
+                  "letterSpacing": "0em",
+                  "lineHeight": "20px"
+                },
+                "body-sm": {
+                  "fontFamily": "Inter",
+                  "fontSize": "12px",
+                  "fontWeight": "400",
+                  "letterSpacing": "0em",
+                  "lineHeight": "16px"
+                },
+                "code": {
+                  "fontFamily": "monospace",
+                  "fontSize": "13px",
+                  "fontWeight": "400",
+                  "letterSpacing": "0em",
+                  "lineHeight": "18px"
+                },
+                "display": {
+                  "fontFamily": "Inter",
+                  "fontSize": "24px",
+                  "fontWeight": "600",
+                  "letterSpacing": "-0.02em",
+                  "lineHeight": "32px"
+                },
+                "header-1": {
+                  "fontFamily": "Inter",
+                  "fontSize": "18px",
+                  "fontWeight": "600",
+                  "letterSpacing": "-0.01em",
+                  "lineHeight": "24px"
+                },
+                "header-2": {
+                  "fontFamily": "Inter",
+                  "fontSize": "14px",
+                  "fontWeight": "600",
+                  "letterSpacing": "0em",
+                  "lineHeight": "20px"
+                },
+                "label-caps": {
+                  "fontFamily": "Inter",
+                  "fontSize": "11px",
+                  "fontWeight": "700",
+                  "letterSpacing": "0.05em",
+                  "lineHeight": "16px"
+                }
+              }
+            },
+            "title": "Phlink Settings - Appearance (Dark)",
+            "width": "2560"
+          }
+        ],
+        "theme": {}
+      }
+    },
+    {
+      "text": "I've completed the Phlink appearance settings page for desktop in dark mode. \n\nThe design strictly follows your layout and styling requirements:\n- **Desktop Architecture:** Features a 260px left sidebar for navigation and a top header with search.\n- **Utilitarian Theme Selector:** Implemented as a horizontal row of three cards (\"Light\", \"Dark\", and \"Follow system\") with the Dark card selected using the specified #F5E68A accent border.\n- **High-Density Settings:** All requested settings (Home button, Bookmarks bar, Font size, Customize fonts, and Page zoom) are laid out in a clean, professional list format.\n- **Dark Aesthetic:** Used the requested color palette (#0D0D0D canvas, #181818 sidebar, #1F1F1F cards) with 1px hairlines and no drop shadows for a recessive, system-level feel.\n- **No Marketing:** All promotional elements and callouts have been excluded as requested.\n\nThe page is designed for a minimum 1280px width to ensure a proper desktop experience."
+    },
+    {
+      "suggestion": "Change the accent color to blue"
+    },
+    {
+      "suggestion": "Show the 'Privacy and security' page"
+    },
+    {
+      "suggestion": "Adjust the sidebar width to 200px"
+    }
+  ],
+  "projectId": "12962487919675094023",
+  "sessionId": "3929511777899239595"
+}
